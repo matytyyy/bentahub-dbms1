@@ -12,11 +12,11 @@
 
 | Member Name | GitHub Username | Assigned Tables | Complete Resource | Assigned JOIN Report & Type | Feature Area |
 |---|---|---|---|---|---|
-| Member 1 (IJAN) | @github_a | `users`, `roles`, `user_roles` | User Profile & Roles | **INNER JOIN:** Active verified sellers with roles | Core & Auth |
-| Member 2 (IB-IB) | @github_b | `categories`, `item_conditions`, `safe_meetup_zones` | Safe-Zone Config | **LEFT JOIN:** Safe zones with scheduled meetup counts | Master Data |
-| Member 3 (DINGLASAN)| @github_c | `listings`, `listing_images`, `price_drop_alerts` | Item Catalog | **RIGHT JOIN:** Categories with price drop alerts | Item Catalog |
-| Member 4 | (ESPIRITU) | `chat_threads`, `chat_messages`, `meetup_schedules` | Inquiries & Chat | **INNER JOIN:** Active chats with confirmed meetups | Chat & Social |
-| Member 5 (SIGRID)| @github_e | `seller_trust_scores`, `audit_logs` | Trust & Audit Engine | **FULL OUTER JOIN (UNION):** Trust tiers vs audit logs | Trust & Audit |
+| Member 1 (IJAN) | @matytyyy | `users`, `roles`, `user_roles` | User Profile & Roles | **INNER JOIN:** Active verified sellers with roles | Core & Auth |
+| Member 2 (IB-IB) | @EsuMikuroTheCreeper | `categories`, `item_conditions`, `safe_meetup_zones` | Safe-Zone Config | **LEFT JOIN:** Safe zones with scheduled meetup counts | Master Data |
+| Member 3 (DINGLASAN)| @enzo706-arc| `listings`, `listing_images`, `price_drop_alerts` | Item Catalog | **RIGHT JOIN:** Categories with price drop alerts | Item Catalog |
+| Member 4 (ESPIRITU) |@leyespiritu21 | `chat_threads`, `chat_messages`, `meetup_schedules` | Inquiries & Chat | **INNER JOIN:** Active chats with confirmed meetups | Chat & Social |
+| Member 5 (SIGRID)| @Silthia | `seller_trust_scores`, `audit_logs` | Trust & Audit Engine | **FULL OUTER JOIN (UNION):** Trust tiers vs audit logs | Trust & Audit |
 
 ---
 
