@@ -1,10 +1,11 @@
 USE bentahub_db;
 
--- ===================================================
--- Member A (Core & Auth): INNER JOIN Report
+
+-- Member 1 (Ijan): Core & Auth Slice
+-- Assigned JOIN Type: INNER JOIN
 -- Target Tables: users, user_roles, roles
--- Purpose: Retrieve verified sellers and their assigned system roles
--- ===================================================
+-- Purpose: Filter active, verified sellers and their assigned system roles
+
 
 SELECT 
     u.id AS user_id,
