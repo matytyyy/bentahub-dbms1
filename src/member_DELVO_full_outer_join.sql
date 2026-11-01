@@ -1,11 +1,11 @@
 USE bentahub_db;
 
--- ===================================================
--- Member E (Sigrid): Trust & Audit Slice
+
+-- Member 5 (DELVO): Trust & Audit Slice
 -- Assigned JOIN Type: FULL OUTER JOIN (via UNION for MySQL)
 -- Target Tables: users, seller_trust_scores, audit_logs
 -- Purpose: Combine seller trust score records with system audit logs
--- ===================================================
+
 
 SELECT 
     u.full_name,
