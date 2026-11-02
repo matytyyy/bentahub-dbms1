@@ -2,6 +2,11 @@ DROP DATABASE IF EXISTS bentahub_db;
 CREATE DATABASE bentahub_db;
 USE bentahub_db;
 
+-- ============================================================================
+-- MEMBER 1: IJAN (Core Authentication, Users & Roles Slice)
+-- Primary Tables: users, roles, user_roles
+-- ============================================================================
+
 -- 1. Users Table
 CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -29,12 +34,22 @@ CREATE TABLE user_roles (
     FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 );
 
+-- ============================================================================
+-- MEMBER 3: DINGLASAN (Categories & Catalog Slice)
+-- Primary Tables: categories
+-- ============================================================================
+
 -- 4. Categories Table
 CREATE TABLE categories (
     id INT AUTO_INCREMENT PRIMARY KEY,
     category_name VARCHAR(100) NOT NULL UNIQUE,
     description VARCHAR(255)
 );
+
+-- ============================================================================
+-- MEMBER 2: IB-IB (Safe Zones, Item Conditions & Product Listings Slice)
+-- Primary Tables: item_conditions, safe_meetup_zones, listings, listing_images
+-- ============================================================================
 
 -- 5. Item Conditions Table
 CREATE TABLE item_conditions (
@@ -77,6 +92,11 @@ CREATE TABLE listing_images (
     FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
 );
 
+-- ============================================================================
+-- MEMBER 3: DINGLASAN (Price Drop Alerts Module)
+-- Primary Tables: price_drop_alerts
+-- ============================================================================
+
 -- 9. Price Drop Alerts Table
 CREATE TABLE price_drop_alerts (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -87,6 +107,11 @@ CREATE TABLE price_drop_alerts (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
 );
+
+-- ============================================================================
+-- MEMBER 4: ESPIRITU (Chat Threads, Messages & Meetup Schedules Slice)
+-- Primary Tables: chat_threads, chat_messages, meetup_schedules
+-- ============================================================================
 
 -- 10. Chat Threads Table
 CREATE TABLE chat_threads (
@@ -121,6 +146,11 @@ CREATE TABLE meetup_schedules (
     FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE,
     FOREIGN KEY (zone_id) REFERENCES safe_meetup_zones(id) ON DELETE RESTRICT
 );
+
+-- ============================================================================
+-- MEMBER 5: DELVO / SIGRID (Seller Trust Scores & System Audit Logs Slice)
+-- Primary Tables: seller_trust_scores, audit_logs
+-- ============================================================================
 
 -- 13. Seller Trust Scores Table
 CREATE TABLE seller_trust_scores (
