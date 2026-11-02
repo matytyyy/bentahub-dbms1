@@ -31,6 +31,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_category'])) {
     }
 }
  
+// 1b. CREATE: Add a new Price Drop Alert (with target price)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_alert'])) {
+    $alertUserId    = (int)($_POST['user_id'] ?? 0);
+    $alertListingId = (int)($_POST['listing_id'] ?? 0);
+    $targetPrice    = trim($_POST['target_price'] ?? '');
+ 
+    if ($alertUserId <= 0 || $alertListingId <= 0) {
+        $error = "Please choose a user and a listing.";
+    } elseif (!is_numeric($targetPrice) || (float)$targetPrice <= 0) {
+        $error = "Please enter a target price greater than 0.";
+    } else {
+        try {
+            $stmt = $pdo->prepare(
+                "INSERT INTO price_drop_alerts (user_id, listing_id, target_price) VALUES (?, ?, ?)"
+            );
+            $stmt->execute([$alertUserId, $alertListingId, round((float)$targetPrice, 2)]);
+            header("Location: dinglasan.php");
+            exit;
+        } catch (Exception $e) {
+            $error = "Error adding price drop alert: " . $e->getMessage();
+        }
+    }
+}
+ 
 // 2. READ REPORT: RIGHT JOIN - every price drop alert with its listing's category.
 //    price_drop_alerts has no category_id, so the category is reached through listings:
 //    price_drop_alerts -> listings -> categories
@@ -46,6 +70,32 @@ $sql = "
     ORDER BY pda.id ASC
 ";
 $alerts = $pdo->query($sql)->fetchAll();
+ 
+// 3. MAIN LIST: RIGHT JOIN keeping EVERY category, even new ones with no listings or alerts.
+//    categories is the right-most table, so all of its rows are preserved.
+$sqlCategories = "
+    SELECT c.id AS category_id,
+           c.category_name,
+           c.description,
+           COUNT(DISTINCT l.id)   AS listing_count,
+           COUNT(DISTINCT pda.id) AS alert_count
+    FROM price_drop_alerts pda
+    RIGHT JOIN listings l ON l.id = pda.listing_id
+    RIGHT JOIN categories c ON c.id = l.category_id
+    GROUP BY c.id, c.category_name, c.description
+    ORDER BY c.id ASC
+";
+$categories = $pdo->query($sqlCategories)->fetchAll();
+ 
+// Dropdown data for the price drop alert form
+$users = $pdo->query("SELECT id, full_name FROM users ORDER BY full_name")->fetchAll();
+$listings = $pdo->query("
+    SELECT l.id, l.title, l.price, c.category_name
+    FROM listings l
+    INNER JOIN categories c ON c.id = l.category_id
+    WHERE l.status = 'active'
+    ORDER BY l.title
+")->fetchAll();
 ?>
  
 <!DOCTYPE html>
@@ -175,7 +225,8 @@ $alerts = $pdo->query($sql)->fetchAll();
             margin-bottom: 6px;
         }
  
-        .form-group input {
+        .form-group input,
+        .form-group select {
             width: 100%;
             padding: 10px 12px;
             border: 1px solid var(--border-color);
@@ -186,7 +237,8 @@ $alerts = $pdo->query($sql)->fetchAll();
             color: var(--text-dark);
         }
  
-        .form-group input:focus {
+        .form-group input:focus,
+        .form-group select:focus {
             outline: 2px solid var(--forest-hover);
             outline-offset: 1px;
         }
@@ -265,6 +317,8 @@ $alerts = $pdo->query($sql)->fetchAll();
  
         <div class="layout-grid">
  
+            <div style="display: grid; gap: 28px;">
+ 
             <!-- Add category form -->
             <div class="card">
                 <h3>Add a category</h3>
@@ -284,6 +338,90 @@ $alerts = $pdo->query($sql)->fetchAll();
  
                     <button type="submit" name="add_category" class="btn">Add category</button>
                 </form>
+            </div>
+ 
+            <!-- Add price drop alert form -->
+            <div class="card">
+                <h3>Add a price drop alert</h3>
+ 
+                <form method="POST" action="dinglasan.php">
+                    <div class="form-group">
+                        <label for="alert_user_id">User</label>
+                        <select name="user_id" id="alert_user_id" required>
+                            <option value="">Select a user</option>
+                            <?php foreach ($users as $u): ?>
+                                <option value="<?= (int)$u['id'] ?>">
+                                    <?= htmlspecialchars($u['full_name']) ?> (ID <?= (int)$u['id'] ?>)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+ 
+                    <div class="form-group">
+                        <label for="alert_listing_id">Listing</label>
+                        <select name="listing_id" id="alert_listing_id" required>
+                            <option value="">Select a listing</option>
+                            <?php foreach ($listings as $l): ?>
+                                <option value="<?= (int)$l['id'] ?>">
+                                    <?= htmlspecialchars($l['title']) ?>
+                                    (<?= htmlspecialchars($l['category_name']) ?>, PHP <?= number_format((float)$l['price'], 2) ?>)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+ 
+                    <div class="form-group">
+                        <label for="target_price">Target price (PHP)</label>
+                        <input type="number" name="target_price" id="target_price"
+                               min="0.01" step="0.01" placeholder="e.g. 1500.00" required>
+                    </div>
+ 
+                    <button type="submit" name="add_alert" class="btn">Add alert</button>
+                </form>
+            </div>
+ 
+            </div>
+ 
+            <div style="display: grid; gap: 28px;">
+ 
+            <!-- Main list: every category, including newly added ones -->
+            <div class="card">
+                <h3>All categories</h3>
+ 
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Category</th>
+                                <th>Description</th>
+                                <th>Listings</th>
+                                <th>Alerts</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($categories)): ?>
+                                <tr>
+                                    <td colspan="5" class="empty">No categories yet. Add one on the left.</td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($categories as $c): ?>
+                                    <tr>
+                                        <td><?= (int)$c['category_id'] ?></td>
+                                        <td><?= htmlspecialchars($c['category_name']) ?></td>
+                                        <td>
+                                            <?= $c['description'] !== null && $c['description'] !== ''
+                                                ? htmlspecialchars($c['description'])
+                                                : '<span class="muted">-</span>' ?>
+                                        </td>
+                                        <td><?= (int)$c['listing_count'] ?></td>
+                                        <td><?= (int)$c['alert_count'] ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
             </div>
  
             <!-- Report table -->
@@ -330,6 +468,8 @@ $alerts = $pdo->query($sql)->fetchAll();
                         </tbody>
                     </table>
                 </div>
+            </div>
+ 
             </div>
  
         </div>
