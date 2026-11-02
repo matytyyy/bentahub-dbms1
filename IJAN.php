@@ -1,6 +1,6 @@
 <?php
 require_once 'config/db.php';
-
+//  .
 // 1. CREATE: Form submission to insert user and assign 'Seller' role
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_user'])) {
     $fullName = trim($_POST['full_name']);
