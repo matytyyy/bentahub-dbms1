@@ -2,7 +2,7 @@
 
 ## 📖 Overview
 
-**BentaHub** is a student-focused local marketplace database designed for buying and selling items within a campus or local community. Built as a Database Management Systems 1 (DBMS 1) course project, the system handles item listings, user accounts, product categories, and meetup coordination.
+**BentaHub** is a student-based local marketplace database designed for buying and selling items within a campus or local community. Built as a Database Management Systems 1 (DBMS 1) course project, the system handles item listings, user accounts, product categories, and meetup coordination.
 
 To handle practical campus trading scenarios (such as selling food, snacks, or second-hand items), the database includes tracking for perishable goods using **First-Expired, First-Out (FEFO)** inventory ordering, price drop alerts, and basic seller trust scores across 14 relational tables.
 
