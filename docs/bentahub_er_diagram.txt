@@ -1,120 +1,47 @@
-// ===================================================
-// BentaHub DB — DBMS 1 Full 14-Table ER Diagram
-// ===================================================
+// BentaHub DB - 15-table ER diagram (DBML). Paste into https://dbdiagram.io to export a fresh PNG.
 
-// --- SLICE A: CORE & AUTH (Member 1 IJAN) ---
-Table users {
-  id int [pk, increment]
-  full_name varchar(100) [not null]
-  email varchar(120) [unique, not null]
-  password_hash varchar(255) [not null]
-  phone_number varchar(20)
-  is_verified tinyint [default: 0]
-  created_at timestamp
-}
+// --- IJAN ---
+Table users { id int [pk, increment]  full_name varchar(100) [not null]  email varchar(120) [unique, not null]  password_hash varchar(255) [not null]  phone_number varchar(20)  is_verified tinyint [default: 0]  created_at timestamp }
+Table roles { id int [pk, increment]  role_name varchar(50) [unique, not null]  description varchar(255) }
+Table user_roles { user_id int [pk]  role_id int [pk] }
 
-Table roles {
-  id int [pk, increment]
-  role_name varchar(50) [unique, not null]
-  description varchar(255)
-}
+// --- IB-IB ---
+Table categories { id int [pk, increment]  category_name varchar(100) [unique, not null]  description varchar(255) }
+Table item_conditions { id int [pk, increment]  condition_name varchar(50) [unique, not null]  description varchar(255) }
+Table safe_meetup_zones { id int [pk, increment]  zone_name varchar(100) [not null]  address varchar(255) [not null]  city varchar(100) [not null]  is_geofenced tinyint [default: 1] }
 
-Table user_roles {
-  user_id int [ref: > users.id]
-  role_id int [ref: > roles.id]
+// --- DINGLASAN ---
+Table listings { id int [pk, increment]  seller_id int [not null]  category_id int [not null]  condition_id int [not null]  title varchar(150) [not null]  description text  price decimal(10,2) [not null]  status enum  created_at timestamp }
+Table listing_images { id int [pk, increment]  listing_id int [not null]  image_url varchar(255) [not null]  is_primary tinyint [default: 0] }
+Table price_drop_alerts { id int [pk, increment]  user_id int [not null]  listing_id int [not null]  target_price decimal(10,2) [not null]  created_at timestamp }
 
-  indexes {
-    (user_id, role_id) [pk]
-  }
-}
+// --- ESPIRITU ---
+Table chat_threads { id int [pk, increment]  listing_id int [not null]  buyer_id int [not null]  seller_id int [not null]  created_at timestamp }
+Table chat_messages { id int [pk, increment]  thread_id int [not null]  sender_id int [not null]  message_body text [not null]  sent_at timestamp }
+Table meetup_schedules { id int [pk, increment]  thread_id int [not null]  zone_id int [not null]  scheduled_time datetime [not null]  status enum }
 
-// --- SLICE B: MASTER DATA (Member 2 IB-IB) ---
-Table categories {
-  id int [pk, increment]
-  category_name varchar(100) [unique, not null]
-  description varchar(255)
-}
+// --- DELVO ---
+Table seller_trust_scores { id int [pk, increment]  seller_id int [unique, not null]  rating_score decimal(3,2)  total_reviews int  trust_tier varchar(50) }
+Table reviews { id int [pk, increment]  meetup_id int [unique, not null]  reviewer_id int [not null]  seller_id int [not null]  rating tinyint [not null]  comment varchar(255)  created_at timestamp }
+Table audit_logs { id int [pk, increment]  user_id int  action varchar(100) [not null]  details text  created_at timestamp }
 
-Table item_conditions {
-  id int [pk, increment]
-  condition_name varchar(50) [unique, not null]
-  description varchar(255)
-}
-
-Table safe_meetup_zones {
-  id int [pk, increment]
-  zone_name varchar(100) [not null]
-  address varchar(255) [not null]
-  city varchar(100) [not null]
-  is_geofenced tinyint [default: 1]
-}
-
-// --- SLICE C: ITEM CATALOG (Member 3 DINGLASAN) ---
-Table listings {
-  id int [pk, increment]
-  seller_id int [not null, ref: > users.id]
-  category_id int [not null, ref: > categories.id]
-  condition_id int [not null, ref: > item_conditions.id]
-  title varchar(150) [not null]
-  description text
-  price decimal(10,2) [not null]
-  status enum('active', 'reserved', 'sold', 'archived') [default: 'active']
-  created_at timestamp
-}
-
-Table listing_images {
-  id int [pk, increment]
-  listing_id int [not null, ref: > listings.id]
-  image_url varchar(255) [not null]
-  is_primary tinyint [default: 0]
-}
-
-Table price_drop_alerts {
-  id int [pk, increment]
-  user_id int [not null, ref: > users.id]
-  listing_id int [not null, ref: > listings.id]
-  target_price decimal(10,2) [not null]
-  created_at timestamp
-}
-
-// --- SLICE D: CHATS & SOCIAL (Member 4 ESPIRITU) ---
-Table chat_threads {
-  id int [pk, increment]
-  listing_id int [not null, ref: > listings.id]
-  buyer_id int [not null, ref: > users.id]
-  seller_id int [not null, ref: > users.id]
-  created_at timestamp
-}
-
-Table chat_messages {
-  id int [pk, increment]
-  thread_id int [not null, ref: > chat_threads.id]
-  sender_id int [not null, ref: > users.id]
-  message_body text [not null]
-  sent_at timestamp
-}
-
-Table meetup_schedules {
-  id int [pk, increment]
-  thread_id int [not null, ref: > chat_threads.id]
-  zone_id int [not null, ref: > safe_meetup_zones.id]
-  scheduled_time datetime [not null]
-  status enum('pending', 'confirmed', 'completed', 'cancelled') [default: 'pending']
-}
-
-// --- SLICE E: TRUST & AUDIT (Member 5 SIGRID) ---
-Table seller_trust_scores {
-  id int [pk, increment]
-  seller_id int [unique, not null, ref: - users.id]
-  rating_score decimal(3,2) [default: 5.00]
-  total_reviews int [default: 0]
-  trust_tier varchar(50) [default: 'Bronze']
-}
-
-Table audit_logs {
-  id int [pk, increment]
-  user_id int [not null, ref: > users.id]
-  action varchar(100) [not null]
-  details text
-  created_at timestamp
-}
+Ref: user_roles.user_id > users.id
+Ref: user_roles.role_id > roles.id
+Ref: listings.seller_id > users.id
+Ref: listings.category_id > categories.id
+Ref: listings.condition_id > item_conditions.id
+Ref: listing_images.listing_id > listings.id
+Ref: price_drop_alerts.user_id > users.id
+Ref: price_drop_alerts.listing_id > listings.id
+Ref: chat_threads.listing_id > listings.id
+Ref: chat_threads.buyer_id > users.id
+Ref: chat_threads.seller_id > users.id
+Ref: chat_messages.thread_id > chat_threads.id
+Ref: chat_messages.sender_id > users.id
+Ref: meetup_schedules.thread_id > chat_threads.id
+Ref: meetup_schedules.zone_id > safe_meetup_zones.id
+Ref: seller_trust_scores.seller_id - users.id
+Ref: reviews.meetup_id - meetup_schedules.id
+Ref: reviews.reviewer_id > users.id
+Ref: reviews.seller_id > users.id
+Ref: audit_logs.user_id > users.id
