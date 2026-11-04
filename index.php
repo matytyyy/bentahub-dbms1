@@ -1,173 +1,73 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BentaHub DBMS 1 Application</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
+<?php
+// Dashboard: live numbers + a map of the five member slices and the unique feature.
+require_once __DIR__ . '/includes/layout.php';
 
-        :root {
-            --olive-bg: #3d4a34;
-            --forest-green: #1b4332;
-            --forest-hover: #2d6a4f;
-            --card-bg: rgba(255, 255, 255, 0.92);
-            --text-dark: #1f2937;
-            --text-muted: #4b5563;
-        }
+$stats = null; $triggers = 0;
+try {
+    $stats = $pdo->query("SELECT
+        (SELECT COUNT(*) FROM users) AS users,
+        (SELECT COUNT(*) FROM listings WHERE status = 'active') AS active_listings,
+        (SELECT COUNT(*) FROM listings WHERE status = 'reserved') AS reserved,
+        (SELECT COUNT(*) FROM meetup_schedules WHERE status IN ('pending','confirmed')) AS open_meetups,
+        (SELECT COUNT(*) FROM reviews) AS reviews,
+        (SELECT COUNT(*) FROM audit_logs) AS logs")->fetch();
+    $triggers = (int)$pdo->query('SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE()')->fetchColumn();
+    $top = $pdo->query("SELECT u.full_name, s.trust_tier, s.rating_score FROM seller_trust_scores s JOIN users u ON u.id = s.seller_id ORDER BY s.rating_score DESC, s.total_reviews DESC LIMIT 3")->fetchAll();
+} catch (Throwable $e) { $stats = null; $top = []; }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+$slices = [
+    ['IJAN.php',      'Users & Roles',   'Ijan',      'INNER JOIN',      'users · roles · user_roles',                         'Accounts, bcrypt passwords and role assignment. Report: verified sellers with their roles.'],
+    ['ibib.php',      'Master Data',     'Ib-Ib',     'LEFT JOIN',       'categories · item_conditions · safe_meetup_zones',   'Reference data. Report: every safe zone with its meetup count, even zero.'],
+    ['dinglasan.php', 'Item Catalog',    'Dinglasan', 'RIGHT JOIN',      'listings · listing_images · price_drop_alerts',      'Listings, photos and price-drop alerts. Report: every category with its items and alerts.'],
+    ['espiritu.php',  'Chats & Meetups', 'Espiritu',  'INNER JOIN',      'chat_threads · chat_messages · meetup_schedules',    'Chat then schedule a meetup. Meetup status drives the listing status automatically.'],
+    ['DELVO.php',     'Trust & Audit',   'Delvo',     'FULL OUTER JOIN', 'seller_trust_scores · reviews · audit_logs',         'Reviews compute seller tiers automatically. Report: trust scores vs audit activity.'],
+];
 
-        body {
-            font-family: 'Montserrat', sans-serif;
-            background-color: var(--olive-bg);
-            /* Front page image overlay */
-            background-image: linear-gradient(to bottom, rgba(61, 74, 52, 0.4), rgba(61, 74, 52, 0.85)), 
-                              url('877735046_2627859480988562_1181721907676972821_n (1).png');
-            background-repeat: no-repeat;
-            background-size: cover;
-            background-position: top center;
-            background-attachment: fixed;
-            color: var(--text-dark);
-            min-height: 100vh;
-            padding: 60px 20px;
-        }
+render_header('BentaHub', 'home', 'A campus marketplace where trust is computed, not claimed. Pick a slice to see its CRUD screens and join report.');
+?>
+<?php if ($stats === null): ?>
+  <div class="flash flash-error">The tables are not ready. Run <code>database/schema.sql</code>, the three <code>features_*.sql</code> files, then <code>seed.sql</code> (in that order) and reload.</div>
+<?php else: ?>
+  <?php if ($triggers < 10): ?><div class="flash flash-error">The <code>features_*.sql</code> files have not been loaded (found <?= $triggers ?> triggers, expected 12). Run them after schema.sql, then seed.sql again.</div><?php endif; ?>
+  <div class="grid grid-stats">
+    <div class="card stat"><b><?= (int)$stats['users'] ?></b><span>Users</span></div>
+    <div class="card stat"><b><?= (int)$stats['active_listings'] ?></b><span>Active listings</span></div>
+    <div class="card stat"><b><?= (int)$stats['reserved'] ?></b><span>Reserved items</span></div>
+    <div class="card stat"><b><?= (int)$stats['open_meetups'] ?></b><span>Open meetups</span></div>
+    <div class="card stat"><b><?= (int)$stats['reviews'] ?></b><span>Reviews</span></div>
+    <div class="card stat"><b><?= (int)$stats['logs'] ?></b><span>Audit entries</span></div>
+  </div>
+<?php endif; ?>
 
-        .container {
-            max-width: 850px;
-            margin: 0 auto;
-        }
+<div class="grid grid-cards">
+  <?php foreach ($slices as [$href, $name, $who, $join, $tables, $desc]): ?>
+    <a class="card link-card" href="<?= e($href) ?>">
+      <?= badge($join, 'green') ?>
+      <h3><?= e($name) ?> <span class="muted">· <?= e($who) ?></span></h3>
+      <p><?= e($desc) ?></p>
+      <p style="margin-top:8px"><code><?= e($tables) ?></code></p>
+    </a>
+  <?php endforeach; ?>
+</div>
 
-        .header {
-            text-align: center;
-            margin-bottom: 40px;
-            color: #ffffff;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-        }
-
-        .header h1 {
-            font-size: 2.5rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-            margin-bottom: 8px;
-        }
-
-        .header p {
-            font-size: 1.05rem;
-            font-weight: 500;
-            opacity: 0.9;
-        }
-
-        .nav-grid {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
-
-        .nav-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(10px);
-            border-radius: 14px;
-            padding: 22px 28px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            text-decoration: none;
-            color: var(--text-dark);
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-        }
-
-        .nav-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
-            background: #ffffff;
-        }
-
-        .nav-info h3 {
-            font-size: 1.15rem;
-            font-weight: 700;
-            color: var(--forest-green);
-        }
-
-        .nav-info p {
-            font-size: 0.875rem;
-            color: var(--text-muted);
-            margin-top: 4px;
-            font-weight: 500;
-        }
-
-        .btn-launch {
-            background-color: var(--forest-green);
-            color: #ffffff;
-            font-weight: 600;
-            font-size: 0.875rem;
-            padding: 10px 18px;
-            border-radius: 8px;
-            transition: background-color 0.2s ease, transform 0.1s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .nav-card:hover .btn-launch {
-            background-color: var(--forest-hover);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>BentaHub DBMS 1 Application</h1>
-            <p>Select a group member screen to inspect live database joins and CRUD modules.</p>
-        </div>
-
-        <div class="nav-grid">
-            <a href="ijan.php" class="nav-card">
-                <div class="nav-info">
-                    <h3>Member Ijan</h3>
-                    <p>INNER JOIN: Active Verified Sellers & User Management</p>
-                </div>
-                <span class="btn-launch">View Screen &rarr;</span>
-            </a>
-
-            <a href="ibib.php" class="nav-card">
-                <div class="nav-info">
-                    <h3>Member Ib-Ib</h3>
-                    <p>LEFT JOIN: Safe Zones & Meetup Locations</p>
-                </div>
-                <span class="btn-launch">View Screen &rarr;</span>
-            </a>
-
-            <a href="dinglasan.php" class="nav-card">
-                <div class="nav-info">
-                    <h3>Member Dinglasan</h3>
-                    <p>RIGHT JOIN: Categories & Price Alerts</p>
-                </div>
-                <span class="btn-launch">View Screen &rarr;</span>
-            </a>
-
-            <a href="espiritu.php" class="nav-card">
-                <div class="nav-info">
-                    <h3>Member Espiritu</h3>
-                    <p>INNER JOIN: Active Chats & Meetups</p>
-                </div>
-                <span class="btn-launch">View Screen &rarr;</span>
-            </a>
-
-            <a href="delvo.php" class="nav-card">
-                <div class="nav-info">
-                    <h3>Member Delvo</h3>
-                    <p>FULL OUTER JOIN: Trust Scores & Audit Logs</p>
-                </div>
-                <span class="btn-launch">View Screen &rarr;</span>
-            </a>
-        </div>
-    </div>
-</body>
-</html>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:18px">
+  <section class="card">
+    <h2 style="margin-bottom:6px">Unique feature: Deal Workflow + Trust Engine</h2>
+    <p class="muted" style="margin-bottom:12px">Rules live inside MySQL (triggers, a function, procedures), so no screen can bypass them.</p>
+    <ol class="steps">
+      <li><span><strong>Confirm a meetup</strong> → the listing becomes <em>Reserved</em>; <strong>complete</strong> it → <em>Sold</em>; <strong>cancel</strong> → <em>Active</em> again.</span></li>
+      <li><span><strong>Edge case:</strong> a second buyer cannot confirm a meetup for an item that is already reserved or sold.</span></li>
+      <li><span><strong>Only completed meetups</strong> can be reviewed, and only by that deal's buyer, once.</span></li>
+      <li><span>Every review <strong>recomputes the seller's average and tier</strong> (Bronze, Silver, Gold) and writes an audit entry when the tier changes.</span></li>
+      <li><span><strong>Edge case:</strong> one 5-star review stays Bronze. A tier needs enough reviews, not only a high score.</span></li>
+    </ol>
+  </section>
+  <section class="card">
+    <h2 style="margin-bottom:10px">Top sellers right now</h2>
+    <?php foreach ($top as $t): ?>
+      <p style="display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--line)"><strong><?= e($t['full_name']) ?></strong><span><?= tier_badge($t['trust_tier']) ?> <span class="muted"><?= e($t['rating_score']) ?> / 5</span></span></p>
+    <?php endforeach; if (!$top) echo '<p class="muted">No trust scores yet.</p>'; ?>
+    <p class="muted" style="margin-top:12px">Demo logins use the password <code>password123</code>. The “Acting as” switch in the top bar decides who is recorded in the audit log.</p>
+  </section>
+</div>
+<?php render_footer();
