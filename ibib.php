@@ -1,355 +1,189 @@
 <?php
-require_once 'config/db.php';
- 
-$error = null;
- 
-// 1. CREATE: Handle form submission to add a new Safe Zone
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_zone'])) {
-    $zoneName = trim($_POST['zone_name'] ?? '');
-    $address  = trim($_POST['address'] ?? '');
-    $city     = trim($_POST['city'] ?? '');
- 
-    if ($zoneName === '' || $address === '' || $city === '') {
-        $error = "Please fill in the zone name, address, and city.";
-    } else {
+// IB-IB - Master Data slice: full CRUD for safe meetup zones, categories and item conditions + LEFT JOIN report.
+require_once __DIR__ . '/includes/layout.php';
+
+$tabs   = ['zones' => 'Safe meetup zones', 'categories' => 'Categories', 'conditions' => 'Item conditions'];
+$tab    = $_GET['tab'] ?? post('tab', 'zones');
+if (!isset($tabs[$tab])) $tab = 'zones';
+// Whitelist: table/column names are never taken from user input.
+$lookup = [
+    'categories' => ['table' => 'categories',      'col' => 'category_name',  'fk' => 'category_id',  'max' => 100, 'label' => 'Category'],
+    'conditions' => ['table' => 'item_conditions', 'col' => 'condition_name', 'fk' => 'condition_id', 'max' => 50,  'label' => 'Condition'],
+];
+$errors = [];
+$edit   = null;
+
+/* ---------- CREATE / UPDATE / DELETE ---------- */
+if (is_post()) {
+    csrf_verify();
+    $action = post('action');
+    $id     = (int)post('id');
+
+    if ($action === 'save_zone') {
+        $name = post('zone_name'); $addr = post('address'); $city = post('city');
+        $geo  = isset($_POST['is_geofenced']) ? 1 : 0;
+        if (mb_strlen($name) < 2 || mb_strlen($name) > 100) $errors[] = 'Zone name must be 2 to 100 characters.';
+        if (mb_strlen($addr) < 3 || mb_strlen($addr) > 255) $errors[] = 'Address must be 3 to 255 characters.';
+        if (mb_strlen($city) < 2 || mb_strlen($city) > 100) $errors[] = 'City must be 2 to 100 characters.';
+        if (!$errors) {
+            try {
+                if ($id) {
+                    $pdo->prepare('UPDATE safe_meetup_zones SET zone_name=?, address=?, city=?, is_geofenced=? WHERE id=?')->execute([$name, $addr, $city, $geo, $id]);
+                } else {
+                    $pdo->prepare('INSERT INTO safe_meetup_zones (zone_name, address, city, is_geofenced) VALUES (?,?,?,?)')->execute([$name, $addr, $city, $geo]);
+                    $id = (int)$pdo->lastInsertId();
+                }
+                audit('Saved Safe Zone', "Zone #$id: $name");
+                flash('success', 'Safe zone saved.');
+                redirect(url(['tab' => 'zones']));
+            } catch (Throwable $e) { $errors[] = db_error($e); }
+        }
+        $edit = ['id' => $id, 'zone_name' => $name, 'address' => $addr, 'city' => $city, 'is_geofenced' => $geo];
+    }
+
+    if ($action === 'delete_zone') {
         try {
-            $stmt = $pdo->prepare(
-                "INSERT INTO safe_meetup_zones (zone_name, address, city) VALUES (?, ?, ?)"
-            );
-            $stmt->execute([$zoneName, $address, $city]);
-            header("Location: ibib.php");
-            exit;
-        } catch (Exception $e) {
-            $error = "Error adding safe zone: " . $e->getMessage();
+            $pdo->prepare('DELETE FROM safe_meetup_zones WHERE id=?')->execute([$id]);
+            audit('Deleted Safe Zone', "Zone #$id");
+            flash('success', 'Safe zone deleted.');
+        } catch (Throwable $e) { flash('error', db_error($e) . ' (A zone with scheduled meetups cannot be removed.)'); }
+        redirect(url(['tab' => 'zones']));
+    }
+
+    if (($action === 'save_lookup' || $action === 'delete_lookup') && isset($lookup[$tab])) {
+        $cfg = $lookup[$tab];
+        if ($action === 'save_lookup') {
+            $name = post('name'); $desc = post('description');
+            if (mb_strlen($name) < 2 || mb_strlen($name) > $cfg['max']) $errors[] = $cfg['label'] . ' name must be 2 to ' . $cfg['max'] . ' characters.';
+            if (mb_strlen($desc) > 255) $errors[] = 'Description is limited to 255 characters.';
+            if (!$errors) {
+                try {
+                    if ($id) {
+                        $pdo->prepare("UPDATE {$cfg['table']} SET {$cfg['col']}=?, description=? WHERE id=?")->execute([$name, $desc ?: null, $id]);
+                    } else {
+                        $pdo->prepare("INSERT INTO {$cfg['table']} ({$cfg['col']}, description) VALUES (?,?)")->execute([$name, $desc ?: null]);
+                        $id = (int)$pdo->lastInsertId();
+                    }
+                    audit('Saved ' . $cfg['label'], "#$id: $name");
+                    flash('success', $cfg['label'] . ' saved.');
+                    redirect(url(['tab' => $tab]));
+                } catch (Throwable $e) { $errors[] = db_error($e); }
+            }
+            $edit = ['id' => $id, 'name' => $name, 'description' => $desc];
+        } else {
+            try {
+                $pdo->prepare("DELETE FROM {$cfg['table']} WHERE id=?")->execute([$id]);
+                audit('Deleted ' . $cfg['label'], "#$id");
+                flash('success', $cfg['label'] . ' deleted.');
+            } catch (Throwable $e) { flash('error', db_error($e) . ' (It is still used by listings.)'); }
+            redirect(url(['tab' => $tab]));
         }
     }
 }
- 
-// 2. READ REPORT: LEFT JOIN - every safe zone with its scheduled meetup count
-//    (zones with no meetups still appear, with a count of 0)
-$sql = "
-    SELECT sz.id AS zone_id,
-           sz.zone_name,
-           sz.address,
-           sz.city,
-           sz.is_geofenced,
-           COUNT(ms.id) AS meetup_count
-    FROM safe_meetup_zones sz
-    LEFT JOIN meetup_schedules ms ON sz.id = ms.zone_id
-    GROUP BY sz.id, sz.zone_name, sz.address, sz.city, sz.is_geofenced
-    ORDER BY sz.id ASC
-";
-$zones = $pdo->query($sql)->fetchAll();
+
+/* ---------- load a row into the form (?edit=ID) ---------- */
+if (!$edit && isset($_GET['edit'])) {
+    $eid = (int)$_GET['edit'];
+    if ($tab === 'zones') {
+        $st = $pdo->prepare('SELECT * FROM safe_meetup_zones WHERE id=?');
+    } else {
+        $c = $lookup[$tab];
+        $st = $pdo->prepare("SELECT id, {$c['col']} AS name, description FROM {$c['table']} WHERE id=?");
+    }
+    $st->execute([$eid]);
+    $edit = $st->fetch() ?: null;
+}
+$z = $edit ?? ['id' => 0, 'zone_name' => '', 'address' => '', 'city' => 'Dumaguete City', 'is_geofenced' => 1];
+$l = $edit ?? ['id' => 0, 'name' => '', 'description' => ''];
+
+/* ---------- READ ---------- */
+$zones = $pdo->query('SELECT * FROM safe_meetup_zones ORDER BY id')->fetchAll();
+$rows  = [];
+if (isset($lookup[$tab])) {
+    $c = $lookup[$tab];
+    $rows = $pdo->query("SELECT t.id, t.{$c['col']} AS name, t.description, COUNT(l.id) AS uses
+                         FROM {$c['table']} t LEFT JOIN listings l ON l.{$c['fk']} = t.id
+                         GROUP BY t.id ORDER BY t.id")->fetchAll();
+}
+
+/* ---------- JOIN REPORT: LEFT JOIN ---------- */
+$reportSql = "
+SELECT z.id AS zone_id, z.zone_name, z.address, z.city,
+       COUNT(m.id) AS total_scheduled_meetups,
+       MAX(m.scheduled_time) AS latest_meetup
+FROM safe_meetup_zones z
+LEFT JOIN meetup_schedules m ON z.id = m.zone_id
+GROUP BY z.id, z.zone_name, z.address, z.city
+ORDER BY total_scheduled_meetups DESC, z.zone_name";
+$report = $pdo->query($reportSql)->fetchAll();
+
+render_header('Master Data', 'ibib', 'Reference tables every listing and meetup depends on.', 'LEFT JOIN');
+render_tabs($tabs, $tab);
 ?>
- 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BentaHub - Member Ib-Ib (Safe Zones)</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
- 
-        :root {
-            --beige-bg: #f5f0e6;
-            --forest-green: #1b4332;
-            --forest-hover: #2d6a4f;
-            --card-bg: #ffffff;
-            --text-dark: #1c2518;
-            --text-muted: #5a6551;
-            --border-color: #e2dacd;
-            --badge-green-bg: #dcfce7;
-            --badge-green-text: #15803d;
-        }
- 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
- 
-        body {
-            font-family: 'Montserrat', sans-serif;
-            background-color: var(--beige-bg);
-            color: var(--text-dark);
-            padding: 40px 20px;
-            line-height: 1.5;
-            min-height: 100vh;
-        }
- 
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-        }
- 
-        .header-banner {
-            background: linear-gradient(135deg, rgba(27, 67, 50, 0.92), rgba(45, 106, 79, 0.88)),
-                        url('881387876_1602854481033124_4271610473624714199_n.png');
-            background-size: cover;
-            background-position: center;
-            border-radius: 16px;
-            padding: 32px 36px;
-            color: #ffffff;
-            margin-bottom: 32px;
-            box-shadow: 0 10px 25px rgba(27, 67, 50, 0.18);
-        }
- 
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            text-decoration: none;
-            color: #e2dacd;
-            font-weight: 600;
-            font-size: 0.875rem;
-            margin-bottom: 16px;
-            transition: color 0.2s ease;
-        }
- 
-        .back-link:hover {
-            color: #ffffff;
-        }
- 
-        .header-banner h1 {
-            font-size: 2rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-        }
- 
-        .header-banner p {
-            font-size: 0.95rem;
-            opacity: 0.9;
-            margin-top: 4px;
-            font-weight: 500;
-        }
- 
-        .alert-error {
-            background-color: #fef2f2;
-            color: #b91c1c;
-            border: 1px solid #fecaca;
-            padding: 12px 16px;
-            border-radius: 10px;
-            margin-bottom: 24px;
-            font-size: 0.9rem;
-            font-weight: 500;
-        }
- 
-        .layout-grid {
-            display: grid;
-            grid-template-columns: 340px 1fr;
-            gap: 28px;
-            align-items: start;
-        }
- 
-        @media (max-width: 900px) {
-            .layout-grid { grid-template-columns: 1fr; }
-        }
- 
-        .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 14px;
-            padding: 26px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.04);
-        }
- 
-        .card h3 {
-            font-size: 1.15rem;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }
- 
-        .card .subtitle {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-bottom: 20px;
-        }
- 
-        .form-group {
-            margin-bottom: 16px;
-        }
- 
-        .form-group label {
-            display: block;
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
- 
-        .form-group input {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            background: #fffdf8;
-            color: var(--text-dark);
-        }
- 
-        .form-group input:focus {
-            outline: 2px solid var(--forest-hover);
-            outline-offset: 1px;
-        }
- 
-        .btn {
-            width: 100%;
-            padding: 11px 16px;
-            background: var(--forest-green);
-            color: #ffffff;
-            border: none;
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s ease;
-        }
- 
-        .btn:hover {
-            background: var(--forest-hover);
-        }
- 
-        .table-wrap {
-            overflow-x: auto;
-        }
- 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-        }
- 
-        th {
-            text-align: left;
-            padding: 10px 12px;
-            border-bottom: 2px solid var(--border-color);
-            color: var(--text-muted);
-            font-weight: 600;
-            font-size: 0.8rem;
-        }
- 
-        td {
-            padding: 12px;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: top;
-        }
- 
-        tr:last-child td {
-            border-bottom: none;
-        }
- 
-        .badge {
-            display: inline-block;
-            padding: 2px 10px;
-            border-radius: 999px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            background: var(--badge-green-bg);
-            color: var(--badge-green-text);
-        }
- 
-        .badge.none {
-            background: #f1ede4;
-            color: var(--text-muted);
-        }
- 
-        .empty {
-            text-align: center;
-            padding: 28px 12px;
-            color: var(--text-muted);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
- 
-        <div class="header-banner">
-            <a href="index.php" class="back-link">&larr; Back to dashboard</a>
-            <h1>Safe Zones</h1>
-            <p>Every safe meetup zone with its number of scheduled meetups (LEFT JOIN)</p>
-        </div>
- 
-        <?php if ($error): ?>
-            <div class="alert-error"><?= htmlspecialchars($error) ?></div>
-        <?php endif; ?>
- 
-        <div class="layout-grid">
- 
-            <!-- Add safe zone form -->
-            <div class="card">
-                <h3>Add a safe zone</h3>
-                <p class="subtitle">Create a campus or community spot for meetups.</p>
- 
-                <form method="POST" action="ibib.php">
-                    <div class="form-group">
-                        <label for="zone_name">Zone name</label>
-                        <input type="text" name="zone_name" id="zone_name" maxlength="100"
-                               placeholder="e.g. Library Main Entrance" required>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="address">Address</label>
-                        <input type="text" name="address" id="address" maxlength="255"
-                               placeholder="Street or landmark" required>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="city">City</label>
-                        <input type="text" name="city" id="city" maxlength="100"
-                               placeholder="e.g. Cebu City" required>
-                    </div>
- 
-                    <button type="submit" name="add_zone" class="btn">Add safe zone</button>
-                </form>
-            </div>
- 
-            <!-- Report table -->
-            <div class="card">
-                <h3>Safe zones and meetups</h3>
-                <p class="subtitle">Zones with no meetups are still listed, with a count of 0.</p>
- 
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Zone</th>
-                                <th>Address</th>
-                                <th>City</th>
-                                <th>Geofenced</th>
-                                <th>Meetups</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($zones)): ?>
-                                <tr>
-                                    <td colspan="6" class="empty">
-                                        No safe zones yet. Import database/seed.sql or add one.
-                                    </td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($zones as $z): ?>
-                                    <tr>
-                                        <td><?= (int)$z['zone_id'] ?></td>
-                                        <td><?= htmlspecialchars($z['zone_name']) ?></td>
-                                        <td><?= htmlspecialchars($z['address']) ?></td>
-                                        <td><?= htmlspecialchars($z['city']) ?></td>
-                                        <td><?= $z['is_geofenced'] ? 'Yes' : 'No' ?></td>
-                                        <td>
-                                            <span class="badge <?= (int)$z['meetup_count'] === 0 ? 'none' : '' ?>">
-                                                <?= (int)$z['meetup_count'] ?>
-                                            </span>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
- 
-        </div>
-    </div>
-</body>
-</html>
+<div class="grid grid-form">
+  <section class="card">
+  <?php if ($tab === 'zones'): ?>
+    <div class="card-head"><h2><?= $z['id'] ? 'Edit zone #' . (int)$z['id'] : 'Add safe zone' ?></h2>
+      <?php if ($z['id']): ?><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => 'zones'])) ?>">Cancel</a><?php endif; ?></div>
+    <?= errors_box($errors) ?>
+    <form method="post"><?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_zone"><input type="hidden" name="tab" value="zones"><input type="hidden" name="id" value="<?= (int)$z['id'] ?>">
+      <div class="field"><label>Zone name</label><input type="text" name="zone_name" required maxlength="100" value="<?= e($z['zone_name']) ?>"></div>
+      <div class="field"><label>Address</label><input type="text" name="address" required maxlength="255" value="<?= e($z['address']) ?>"></div>
+      <div class="field"><label>City</label><input type="text" name="city" required maxlength="100" value="<?= e($z['city']) ?>"></div>
+      <label class="check"><input type="checkbox" name="is_geofenced" <?= $z['is_geofenced'] ? 'checked' : '' ?>> Geofenced (meetup must happen inside this zone)</label>
+      <div class="form-actions"><button class="btn" type="submit"><?= $z['id'] ? 'Save changes' : 'Add zone' ?></button></div>
+    </form>
+  <?php else: $cfg = $lookup[$tab]; ?>
+    <div class="card-head"><h2><?= $l['id'] ? 'Edit ' . e(strtolower($cfg['label'])) . ' #' . (int)$l['id'] : 'Add ' . e(strtolower($cfg['label'])) ?></h2>
+      <?php if ($l['id']): ?><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => $tab])) ?>">Cancel</a><?php endif; ?></div>
+    <?= errors_box($errors) ?>
+    <form method="post"><?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_lookup"><input type="hidden" name="tab" value="<?= e($tab) ?>"><input type="hidden" name="id" value="<?= (int)$l['id'] ?>">
+      <div class="field"><label><?= e($cfg['label']) ?> name</label><input type="text" name="name" required maxlength="<?= (int)$cfg['max'] ?>" value="<?= e($l['name']) ?>"></div>
+      <div class="field"><label>Description <span class="hint">(optional)</span></label><textarea name="description" maxlength="255"><?= e($l['description']) ?></textarea></div>
+      <div class="form-actions"><button class="btn" type="submit"><?= $l['id'] ? 'Save changes' : 'Add ' . e(strtolower($cfg['label'])) ?></button></div>
+    </form>
+  <?php endif; ?>
+  </section>
+
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><h2><?= e($tabs[$tab]) ?></h2></div>
+      <div class="table-wrap"><table>
+      <?php if ($tab === 'zones'): ?>
+        <thead><tr><th>#</th><th>Zone</th><th>Address</th><th>City</th><th>Geofenced</th><th></th></tr></thead><tbody>
+        <?php foreach ($zones as $r): ?>
+          <tr><td><?= (int)$r['id'] ?></td><td><strong><?= e($r['zone_name']) ?></strong></td><td><?= e($r['address']) ?></td><td><?= e($r['city']) ?></td>
+              <td><?= $r['is_geofenced'] ? badge('Yes', 'green') : badge('No', 'gray') ?></td>
+              <td class="actions"><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => 'zones', 'edit' => $r['id']])) ?>">Edit</a>
+                <?= delete_form('delete_zone', ['id' => $r['id'], 'tab' => 'zones'], 'Delete zone "' . $r['zone_name'] . '"?') ?></td></tr>
+        <?php endforeach; if (!$zones) echo empty_row(6, 'No safe zones yet.'); ?>
+      <?php else: ?>
+        <thead><tr><th>#</th><th>Name</th><th>Description</th><th>Used by</th><th></th></tr></thead><tbody>
+        <?php foreach ($rows as $r): ?>
+          <tr><td><?= (int)$r['id'] ?></td><td><strong><?= e($r['name']) ?></strong></td><td><?= e($r['description'] ?: '—') ?></td>
+              <td><?= badge($r['uses'] . ' listing' . ($r['uses'] == 1 ? '' : 's'), $r['uses'] ? 'green' : 'gray') ?></td>
+              <td class="actions"><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => $tab, 'edit' => $r['id']])) ?>">Edit</a>
+                <?= delete_form('delete_lookup', ['id' => $r['id'], 'tab' => $tab], 'Delete "' . $r['name'] . '"?') ?></td></tr>
+        <?php endforeach; if (!$rows) echo empty_row(5); ?>
+      <?php endif; ?>
+      </tbody></table></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Report: safe zones with scheduled meetup counts</h2><?= badge('LEFT JOIN', 'green') ?></div>
+      <p class="muted" style="margin-bottom:12px">Every zone is listed, even those with <strong>zero</strong> meetups (the right-hand side is NULL → count 0).</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Zone</th><th>City</th><th>Meetups</th><th>Latest meetup</th></tr></thead><tbody>
+        <?php foreach ($report as $r): ?>
+          <tr><td><?= (int)$r['zone_id'] ?></td><td><strong><?= e($r['zone_name']) ?></strong><br><span class="muted"><?= e($r['address']) ?></span></td><td><?= e($r['city']) ?></td>
+              <td><?= badge((string)$r['total_scheduled_meetups'], $r['total_scheduled_meetups'] > 0 ? 'green' : 'amber') ?></td>
+              <td><?= $r['latest_meetup'] ? e(dt($r['latest_meetup'])) : '<span class="null">never used</span>' ?></td></tr>
+        <?php endforeach; if (!$report) echo empty_row(5); ?>
+      </tbody></table></div>
+      <?= sql_block($reportSql) ?>
+    </section>
+  </div>
+</div>
+<?php render_footer();
