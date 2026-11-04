@@ -1,373 +1,210 @@
 <?php
-require_once 'config/db.php';
- 
-$error = null;
- 
-// 1. CREATE: Log a new Audit Action
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_log'])) {
-    $userId = (int)$_POST['user_id'];
-    $action = trim($_POST['action']);
- 
-    if ($userId <= 0 || $action === '') {
-        $error = "Please choose a user and enter an action.";
-    } else {
-        try {
-            $stmt = $pdo->prepare("INSERT INTO audit_logs (user_id, action) VALUES (?, ?)");
-            $stmt->execute([$userId, $action]);
-            header("Location: delvo.php");
-            exit;
-        } catch (Exception $e) {
-            $error = "Error adding audit log: " . $e->getMessage();
+// DELVO - Trust & Audit slice: reviews (full CRUD), computed trust scores, read-only audit log + FULL OUTER JOIN report.
+// Feature owner (Part B of the unique feature): every review automatically recomputes the seller's score and tier
+// inside the database (triggers + fn_trust_tier in database/features_trust_engine.sql). The score is never typed by hand.
+require_once __DIR__ . '/includes/layout.php';
+
+$tabs   = ['trust' => 'Trust engine & reviews', 'audit' => 'Audit log'];
+$tab    = $_GET['tab'] ?? post('tab', 'trust');
+if (!isset($tabs[$tab])) $tab = 'trust';
+$errors = [];
+$edit   = null;
+
+/* ---------- CREATE / UPDATE / DELETE reviews ---------- */
+if (is_post()) {
+    csrf_verify();
+    $action = post('action');
+    $id     = (int)post('id');
+
+    if ($action === 'save_review') {
+        $mid = (int)post('meetup_id'); $rating = (int)post('rating'); $comment = post('comment');
+        if (!$id && !$mid)                    $errors[] = 'Choose the meetup you are reviewing.';
+        if ($rating < 1 || $rating > 5)       $errors[] = 'Rating must be between 1 and 5.';
+        if (mb_strlen($comment) > 255)        $errors[] = 'Comment is limited to 255 characters.';
+        if (!$errors) {
+            try {
+                if ($id) {
+                    $pdo->prepare('UPDATE reviews SET rating=?, comment=? WHERE id=?')->execute([$rating, $comment ?: null, $id]);
+                    $st = $pdo->prepare('SELECT seller_id FROM reviews WHERE id=?');
+                    $st->execute([$id]);
+                    $sellerId = (int)$st->fetchColumn();
+                } else {
+                    // The buyer and the seller come from the meetup's chat; the database trigger double-checks them.
+                    $st = $pdo->prepare('SELECT t.buyer_id, t.seller_id FROM meetup_schedules m JOIN chat_threads t ON t.id=m.thread_id WHERE m.id=?');
+                    $st->execute([$mid]);
+                    $deal = $st->fetch();
+                    if (!$deal) throw new DomainException('Meetup not found.');
+                    $pdo->prepare('INSERT INTO reviews (meetup_id, reviewer_id, seller_id, rating, comment) VALUES (?,?,?,?,?)')
+                        ->execute([$mid, $deal['buyer_id'], $deal['seller_id'], $rating, $comment ?: null]);
+                    $id = (int)$pdo->lastInsertId();
+                    $sellerId = (int)$deal['seller_id'];
+                }
+                $st = $pdo->prepare('SELECT u.full_name, s.rating_score, s.total_reviews, s.trust_tier FROM seller_trust_scores s JOIN users u ON u.id=s.seller_id WHERE s.seller_id=?');
+                $st->execute([$sellerId]);
+                $sc = $st->fetch();
+                audit('Saved Review', "Review #$id, $rating star(s)");
+                flash('success', 'Review saved.' . ($sc ? " {$sc['full_name']} is now {$sc['trust_tier']} ({$sc['rating_score']} avg from {$sc['total_reviews']} review(s))." : ''));
+                redirect(url(['tab' => 'trust']));
+            } catch (DomainException $e) { $errors[] = $e->getMessage();
+            } catch (Throwable $e) {
+                $errors[] = ($e instanceof PDOException && (int)($e->errorInfo[1] ?? 0) === 1062) ? 'This meetup already has a review.' : db_error($e);
+            }
         }
+        $edit = ['id' => $id, 'meetup_id' => $mid, 'rating' => $rating, 'comment' => $comment];
+    }
+    if ($action === 'delete_review') {
+        try { $pdo->prepare('DELETE FROM reviews WHERE id=?')->execute([$id]); audit('Deleted Review', "Review #$id"); flash('success', 'Review deleted and the seller score was recalculated.'); }
+        catch (Throwable $e) { flash('error', db_error($e)); }
+        redirect(url(['tab' => 'trust']));
     }
 }
- 
-// 2. READ REPORT: FULL OUTER JOIN emulation (LEFT JOIN UNION RIGHT JOIN)
-$sql = "
-    SELECT ts.seller_id AS score_user_id, ts.rating_score, ts.trust_tier,
-           al.id AS log_id, al.action
-    FROM seller_trust_scores ts
-    LEFT JOIN audit_logs al ON ts.seller_id = al.user_id
-    UNION
-    SELECT ts.seller_id AS score_user_id, ts.rating_score, ts.trust_tier,
-           al.id AS log_id, al.action
-    FROM seller_trust_scores ts
-    RIGHT JOIN audit_logs al ON ts.seller_id = al.user_id
-";
-$logs = $pdo->query($sql)->fetchAll();
- 
-// Users list for the dropdown (so the foreign key never fails)
-$users = $pdo->query("SELECT id, full_name FROM users ORDER BY full_name")->fetchAll();
-?>
- 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BentaHub - Member Delvo (Trust & Audit)</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
- 
-        :root {
-            --beige-bg: #f5f0e6;
-            --forest-green: #1b4332;
-            --forest-hover: #2d6a4f;
-            --card-bg: #ffffff;
-            --text-dark: #1c2518;
-            --text-muted: #5a6551;
-            --border-color: #e2dacd;
-        }
- 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
- 
-        body {
-            font-family: 'Montserrat', sans-serif;
-            background-color: var(--beige-bg);
-            color: var(--text-dark);
-            padding: 40px 20px;
-            line-height: 1.5;
-            min-height: 100vh;
-        }
- 
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-        }
- 
-        .header-banner {
-            background: linear-gradient(135deg, rgba(27, 67, 50, 0.92), rgba(45, 106, 79, 0.88)),
-                        url('881387876_1602854481033124_4271610473624714199_n.png');
-            background-size: cover;
-            background-position: center;
-            border-radius: 16px;
-            padding: 32px 36px;
-            color: #ffffff;
-            margin-bottom: 32px;
-            box-shadow: 0 10px 25px rgba(27, 67, 50, 0.18);
-        }
- 
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            text-decoration: none;
-            color: #e2dacd;
-            font-weight: 600;
-            font-size: 0.875rem;
-            margin-bottom: 16px;
-            transition: color 0.2s ease;
-        }
- 
-        .back-link:hover {
-            color: #ffffff;
-        }
- 
-        .header-banner h1 {
-            font-size: 2rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-        }
- 
-        .header-banner p {
-            font-size: 0.95rem;
-            opacity: 0.9;
-            margin-top: 4px;
-            font-weight: 500;
-        }
- 
-        .alert-error {
-            background-color: #fef2f2;
-            color: #b91c1c;
-            border: 1px solid #fecaca;
-            padding: 12px 16px;
-            border-radius: 10px;
-            margin-bottom: 24px;
-            font-size: 0.9rem;
-            font-weight: 500;
-        }
- 
-        .layout-grid {
-            display: grid;
-            grid-template-columns: 340px 1fr;
-            gap: 28px;
-            align-items: start;
-        }
- 
-        @media (max-width: 900px) {
-            .layout-grid { grid-template-columns: 1fr; }
-        }
- 
-        .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 14px;
-            padding: 26px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.04);
-        }
- 
-        .card h2 {
-            font-size: 1.15rem;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }
- 
-        .card .subtitle {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-bottom: 20px;
-        }
- 
-        .form-group {
-            margin-bottom: 16px;
-        }
- 
-        .form-group label {
-            display: block;
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
- 
-        .form-group select,
-        .form-group input {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            background: #fffdf8;
-            color: var(--text-dark);
-        }
- 
-        .form-group select:focus,
-        .form-group input:focus {
-            outline: 2px solid var(--forest-hover);
-            outline-offset: 1px;
-        }
- 
-        .btn {
-            width: 100%;
-            padding: 11px 16px;
-            background: var(--forest-green);
-            color: #ffffff;
-            border: none;
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s ease;
-        }
- 
-        .btn:hover {
-            background: var(--forest-hover);
-        }
- 
-        .table-wrap {
-            overflow-x: auto;
-        }
- 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-        }
- 
-        th {
-            text-align: left;
-            padding: 10px 12px;
-            border-bottom: 2px solid var(--border-color);
-            color: var(--text-muted);
-            font-weight: 600;
-            font-size: 0.8rem;
-        }
- 
-        td {
-            padding: 12px;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: top;
-        }
- 
-        tr:last-child td {
-            border-bottom: none;
-        }
- 
-        .badge {
-            display: inline-block;
-            padding: 2px 10px;
-            border-radius: 999px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            background: #e6efe9;
-            color: var(--forest-green);
-        }
- 
-        .muted {
-            color: var(--text-muted);
-            font-style: italic;
-        }
- 
-        .empty {
-            text-align: center;
-            padding: 28px 12px;
-            color: var(--text-muted);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
- 
-        <div class="header-banner">
-            <a href="index.php" class="back-link">&larr; Back to dashboard</a>
-            <h1>Trust &amp; Audit Engine</h1>
-            <p>Seller trust tiers compared with audit log activity (FULL OUTER JOIN)</p>
-        </div>
- 
-        <?php if ($error): ?>
-            <div class="alert-error"><?= htmlspecialchars($error) ?></div>
-        <?php endif; ?>
- 
-        <div class="layout-grid">
- 
-            <!-- Add audit log form -->
-            <div class="card">
-                <h2>Log an action</h2>
-                <p class="subtitle">Record an admin or user action in the audit log.</p>
- 
-                <form method="POST" action="delvo.php">
-                    <div class="form-group">
-                        <label for="user_id">User</label>
-                        <select name="user_id" id="user_id" required>
-                            <option value="">Select a user</option>
-                            <?php foreach ($users as $u): ?>
-                                <option value="<?= (int)$u['id'] ?>">
-                                    <?= htmlspecialchars($u['full_name']) ?> (ID <?= (int)$u['id'] ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="action">Action</label>
-                        <input type="text" name="action" id="action" maxlength="100"
-                               placeholder="e.g. Verified seller account" required>
-                    </div>
- 
-                    <button type="submit" name="add_log" class="btn">Add log</button>
-                </form>
-            </div>
- 
-            <!-- Report table -->
-            <div class="card">
-                <h2>Trust scores and audit logs</h2>
-                <p class="subtitle">Sellers without logs and logs without a trust score both appear.</p>
- 
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Seller ID</th>
-                                <th>Rating</th>
-                                <th>Tier</th>
-                                <th>Log ID</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($logs)): ?>
-                                <tr>
-                                    <td colspan="5" class="empty">
-                                        No data yet. Import database/seed.sql or add a log.
-                                    </td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($logs as $row): ?>
-                                    <tr>
-                                        <td>
-                                            <?php if ($row['score_user_id'] !== null): ?>
-                                                <?= (int)$row['score_user_id'] ?>
-                                            <?php else: ?>
-                                                <span class="muted">No score</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <?= $row['rating_score'] !== null
-                                                ? htmlspecialchars($row['rating_score'])
-                                                : '<span class="muted">-</span>' ?>
-                                        </td>
-                                        <td>
-                                            <?php if ($row['trust_tier'] !== null): ?>
-                                                <span class="badge"><?= htmlspecialchars($row['trust_tier']) ?></span>
-                                            <?php else: ?>
-                                                <span class="muted">-</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <?= $row['log_id'] !== null
-                                                ? (int)$row['log_id']
-                                                : '<span class="muted">No log</span>' ?>
-                                        </td>
-                                        <td>
-                                            <?= $row['action'] !== null
-                                                ? htmlspecialchars($row['action'])
-                                                : '<span class="muted">-</span>' ?>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
- 
-        </div>
-    </div>
-</body>
-</html>
 
-// delvo
+if (!$edit && isset($_GET['edit'])) {
+    $st = $pdo->prepare('SELECT * FROM reviews WHERE id=?'); $st->execute([(int)$_GET['edit']]);
+    $edit = $st->fetch() ?: null;
+}
+$f = $edit ?? ['id' => 0, 'meetup_id' => '', 'rating' => 5, 'comment' => ''];
+
+/* ---------- READ ---------- */
+$meetups = $pdo->query("
+    SELECT s.id, s.status, l.title, bu.full_name AS buyer, se.full_name AS seller,
+           (SELECT COUNT(*) FROM reviews r WHERE r.meetup_id = s.id) AS reviewed
+    FROM meetup_schedules s
+    JOIN chat_threads t ON t.id = s.thread_id
+    JOIN listings l     ON l.id = t.listing_id
+    JOIN users bu       ON bu.id = t.buyer_id
+    JOIN users se       ON se.id = t.seller_id
+    ORDER BY s.id DESC")->fetchAll();
+$reviews = $pdo->query("
+    SELECT r.id, r.rating, r.comment, r.created_at, bu.full_name AS buyer, se.full_name AS seller, l.title
+    FROM reviews r
+    JOIN users bu ON bu.id = r.reviewer_id
+    JOIN users se ON se.id = r.seller_id
+    JOIN meetup_schedules s ON s.id = r.meetup_id
+    JOIN chat_threads t ON t.id = s.thread_id
+    JOIN listings l ON l.id = t.listing_id
+    ORDER BY r.id DESC")->fetchAll();
+$scores = $pdo->query("
+    SELECT u.full_name, s.rating_score, s.total_reviews, s.trust_tier
+    FROM seller_trust_scores s JOIN users u ON u.id = s.seller_id
+    ORDER BY s.rating_score DESC, s.total_reviews DESC")->fetchAll();
+
+$logSearch = trim((string)($_GET['q'] ?? ''));
+$st = $pdo->prepare("
+    SELECT a.id, a.action, a.details, a.created_at, u.full_name
+    FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id
+    WHERE (? = '' OR a.action LIKE ? OR a.details LIKE ?)
+    ORDER BY a.id DESC LIMIT 100");
+$like = '%' . $logSearch . '%';
+$st->execute([$logSearch, $like, $like]);
+$logs = $st->fetchAll();
+
+function next_tier_hint(array $s): string {
+    $avg = (float)$s['rating_score']; $n = (int)$s['total_reviews'];
+    if ($s['trust_tier'] === 'Gold') return 'Top tier';
+    if ($s['trust_tier'] === 'Silver') return max(0, 4 - $n) > 0 ? 'Needs ' . (4 - $n) . ' more review(s) and avg ≥ 4.50 for Gold' : 'Needs avg ≥ 4.50 for Gold';
+    return $n < 2 ? 'Needs ' . (2 - $n) . ' more review(s) and avg ≥ 4.00 for Silver' : 'Needs avg ≥ 4.00 for Silver';
+}
+
+/* ---------- JOIN REPORT: FULL OUTER JOIN (emulated: LEFT JOIN ∪ RIGHT JOIN) ---------- */
+$reportSql = "
+SELECT x.user_id, u.full_name, x.trust_tier, x.rating_score, x.action, x.logged_at,
+       CASE WHEN x.rating_score IS NULL THEN 'Audit log only (no trust score)'
+            WHEN x.action IS NULL       THEN 'Trust score only (no audit activity)'
+            ELSE 'Matched' END AS match_type
+FROM (
+    SELECT s.seller_id AS user_id, s.trust_tier, s.rating_score, a.action, a.created_at AS logged_at
+    FROM seller_trust_scores s
+    LEFT JOIN audit_logs a  ON a.user_id = s.seller_id
+  UNION
+    SELECT a.user_id, s.trust_tier, s.rating_score, a.action, a.created_at
+    FROM seller_trust_scores s
+    RIGHT JOIN audit_logs a ON a.user_id = s.seller_id
+) x
+LEFT JOIN users u ON u.id = x.user_id
+ORDER BY u.full_name, x.logged_at";
+$report = $pdo->query($reportSql)->fetchAll();
+
+render_header('Trust & Audit', 'trust', 'Reviews automatically drive seller trust tiers. Every important action is logged.', 'FULL OUTER JOIN');
+render_tabs($tabs, $tab);
+if ($tab === 'audit'): ?>
+<section class="card">
+  <div class="card-head"><h2>Audit log <span class="muted">(latest <?= count($logs) ?>)</span></h2>
+    <form method="get" class="inline" style="display:flex;gap:8px"><input type="hidden" name="tab" value="audit"><input class="search" type="search" name="q" value="<?= e($logSearch) ?>" placeholder="Search action or details…"><button class="btn btn-sm">Search</button></form></div>
+  <p class="muted" style="margin-bottom:12px">Read-only on purpose: audit entries are written by the app and by database triggers and can never be edited or deleted from the UI.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>#</th><th>When</th><th>User</th><th>Action</th><th>Details</th></tr></thead><tbody>
+    <?php foreach ($logs as $l): ?>
+      <tr><td><?= (int)$l['id'] ?></td><td><?= e(dt($l['created_at'])) ?></td><td><?= $l['full_name'] ? e($l['full_name']) : '<span class="null">system / deleted user</span>' ?></td>
+          <td><?= badge($l['action'], strpos($l['action'], 'Trust') !== false ? 'gold' : (strpos($l['action'], 'Delet') !== false ? 'red' : 'green')) ?></td><td class="muted"><?= e($l['details']) ?></td></tr>
+    <?php endforeach; if (!$logs) echo empty_row(5, 'No log entries match.'); ?>
+  </tbody></table></div>
+</section>
+<?php else: ?>
+<div class="grid grid-form">
+  <section class="card">
+    <div class="card-head"><h2><?= $f['id'] ? 'Edit review #' . (int)$f['id'] : 'Leave a review' ?></h2>
+      <?php if ($f['id']): ?><a class="btn btn-sm btn-ghost" href="<?= e(url()) ?>">Cancel</a><?php endif; ?></div>
+    <?= errors_box($errors) ?>
+    <form method="post"><?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_review"><input type="hidden" name="tab" value="trust"><input type="hidden" name="id" value="<?= (int)$f['id'] ?>">
+      <?php if (!$f['id']): ?>
+      <div class="field"><label>Meetup <span class="hint">(only completed meetups can be reviewed)</span></label>
+        <select name="meetup_id" required><option value="">Choose…</option>
+        <?php foreach ($meetups as $m): ?>
+          <option value="<?= (int)$m['id'] ?>" <?= (int)$f['meetup_id'] === (int)$m['id'] ? 'selected' : '' ?>>#<?= (int)$m['id'] ?> · <?= e($m['title']) ?> · <?= e($m['buyer']) ?> → <?= e($m['seller']) ?> [<?= e($m['status']) ?><?= $m['reviewed'] ? ', reviewed' : '' ?>]</option>
+        <?php endforeach; ?></select></div>
+      <?php endif; ?>
+      <div class="field"><label>Rating</label><select name="rating">
+        <?php for ($i = 5; $i >= 1; $i--): ?><option value="<?= $i ?>" <?= (int)$f['rating'] === $i ? 'selected' : '' ?>><?= str_repeat('★', $i) . str_repeat('☆', 5 - $i) ?> (<?= $i ?>)</option><?php endfor; ?></select></div>
+      <div class="field"><label>Comment <span class="hint">(optional)</span></label><textarea name="comment" maxlength="255"><?= e($f['comment']) ?></textarea></div>
+      <div class="form-actions"><button class="btn" type="submit"><?= $f['id'] ? 'Save changes' : 'Submit review' ?></button></div>
+    </form>
+    <details class="sql" open><summary>How tiers are computed</summary>
+      <p class="muted" style="margin-top:8px"><strong>Gold</strong>: 4+ reviews and average ≥ 4.50<br><strong>Silver</strong>: 2+ reviews and average ≥ 4.00<br><strong>Bronze</strong>: everyone else (one 5-star review is not enough evidence).<br>Try it: pick a <em>pending</em> meetup and submit, and the database refuses.</p></details>
+  </section>
+
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><h2>Seller trust leaderboard</h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Seller</th><th>Tier</th><th>Average</th><th>Reviews</th><th>Next step</th></tr></thead><tbody>
+        <?php foreach ($scores as $s): ?>
+          <tr><td><strong><?= e($s['full_name']) ?></strong></td><td><?= tier_badge($s['trust_tier']) ?></td>
+              <td><div class="tier-bar" title="<?= e($s['rating_score']) ?> / 5"><i style="width:<?= (int)round(((float)$s['rating_score']) / 5 * 100) ?>%"></i></div><?= e($s['rating_score']) ?> / 5</td>
+              <td><?= (int)$s['total_reviews'] ?></td><td class="muted"><?= e(next_tier_hint($s)) ?></td></tr>
+        <?php endforeach; if (!$scores) echo empty_row(5, 'No scores yet. Scores appear after the first review.'); ?>
+      </tbody></table></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Reviews <span class="muted">(<?= count($reviews) ?>)</span></h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Deal</th><th>Rating</th><th>Comment</th><th></th></tr></thead><tbody>
+        <?php foreach ($reviews as $r): ?>
+          <tr><td><?= (int)$r['id'] ?></td><td><strong><?= e($r['title']) ?></strong><br><span class="muted"><?= e($r['buyer']) ?> → <?= e($r['seller']) ?></span></td>
+              <td><?= str_repeat('★', (int)$r['rating']) . str_repeat('☆', 5 - (int)$r['rating']) ?></td><td class="muted"><?= e($r['comment'] ?: '—') ?></td>
+              <td class="actions"><a class="btn btn-sm btn-ghost" href="<?= e(url(['edit' => $r['id']])) ?>">Edit</a>
+                <?= delete_form('delete_review', ['id' => $r['id'], 'tab' => 'trust'], 'Delete this review? The seller score will be recalculated.') ?></td></tr>
+        <?php endforeach; if (!$reviews) echo empty_row(5, 'No reviews yet.'); ?>
+      </tbody></table></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Report: trust scores vs audit activity</h2><?= badge('FULL OUTER JOIN', 'green') ?></div>
+      <p class="muted" style="margin-bottom:12px">MySQL has no FULL OUTER JOIN, so it is built as <code>LEFT JOIN</code> <strong>UNION</strong> <code>RIGHT JOIN</code> on the same two tables. Rows that exist on only one side are flagged.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>User</th><th>Tier</th><th>Score</th><th>Action</th><th>Match</th></tr></thead><tbody>
+        <?php foreach ($report as $r): ?>
+          <tr><td><strong><?= $r['full_name'] ? e($r['full_name']) : '<span class="null">deleted user</span>' ?></strong></td>
+              <td><?= $r['trust_tier'] !== null ? tier_badge($r['trust_tier']) : '<span class="null">—</span>' ?></td>
+              <td><?= $r['rating_score'] !== null ? e($r['rating_score']) : '<span class="null">—</span>' ?></td>
+              <td><?= $r['action'] !== null ? e($r['action']) : '<span class="null">no activity</span>' ?></td>
+              <td><?= badge($r['match_type'], $r['match_type'] === 'Matched' ? 'green' : 'amber') ?></td></tr>
+        <?php endforeach; if (!$report) echo empty_row(5); ?>
+      </tbody></table></div>
+      <?= sql_block($reportSql) ?>
+    </section>
+  </div>
+</div>
+<?php endif; render_footer();
