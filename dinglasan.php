@@ -1,478 +1,290 @@
 <?php
-require_once 'config/db.php';
- 
-$error = null;
- 
-// 1. CREATE: Add a new Category
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_category'])) {
-    $categoryName = trim($_POST['category_name'] ?? '');
-    $description  = trim($_POST['description'] ?? '');
- 
-    if ($categoryName === '') {
-        $error = "Please enter a category name.";
-    } else {
+// DINGLASAN - Item Catalog slice: full CRUD for listings (+ images) and price-drop alerts + RIGHT JOIN report.
+require_once __DIR__ . '/includes/layout.php';
+
+$tabs     = ['listings' => 'Listings', 'alerts' => 'Price-drop alerts'];
+$tab      = $_GET['tab'] ?? post('tab', 'listings');
+if (!isset($tabs[$tab])) $tab = 'listings';
+$statuses = ['active', 'reserved', 'sold', 'archived'];
+$errors   = [];
+$edit     = null;
+
+/* ---------- CREATE / UPDATE / DELETE ---------- */
+if (is_post()) {
+    csrf_verify();
+    $action = post('action');
+    $id     = (int)post('id');
+
+    if ($action === 'save_listing') {
+        $seller = (int)post('seller_id'); $cat = (int)post('category_id'); $cond = (int)post('condition_id');
+        $title  = post('title'); $desc = post('description'); $price = post('price'); $status = post('status', 'active');
+        if (!$seller || !$cat || !$cond)                        $errors[] = 'Choose a seller, a category and a condition.';
+        if (mb_strlen($title) < 3 || mb_strlen($title) > 150)   $errors[] = 'Title must be 3 to 150 characters.';
+        if (mb_strlen($desc) > 2000)                            $errors[] = 'Description is limited to 2000 characters.';
+        if (!is_numeric($price) || (float)$price <= 0 || (float)$price > 99999999) $errors[] = 'Price must be a number greater than 0.';
+        if (!in_array($status, $statuses, true))                $errors[] = 'Invalid status.';
+        if (!$errors) {
+            try {
+                $old = null;
+                if ($id) { $st = $pdo->prepare('SELECT price FROM listings WHERE id=?'); $st->execute([$id]); $old = $st->fetchColumn(); }
+                if ($id) {
+                    $pdo->prepare('UPDATE listings SET seller_id=?, category_id=?, condition_id=?, title=?, description=?, price=?, status=? WHERE id=?')
+                        ->execute([$seller, $cat, $cond, $title, $desc ?: null, $price, $status, $id]);
+                } else {
+                    $pdo->prepare('INSERT INTO listings (seller_id, category_id, condition_id, title, description, price, status) VALUES (?,?,?,?,?,?,?)')
+                        ->execute([$seller, $cat, $cond, $title, $desc ?: null, $price, $status]);
+                    $id = (int)$pdo->lastInsertId();
+                }
+                audit($old === null ? 'Created Listing' : 'Updated Listing', "Listing #$id: $title");
+                flash('success', $old === null ? 'Listing created. Add photos below.' : 'Listing updated.');
+                if ($old !== null && (float)$price < (float)$old) {   // the DB trigger already logged "Price Dropped"
+                    $st = $pdo->prepare('SELECT COUNT(*) FROM v_triggered_price_alerts WHERE listing_id=?'); $st->execute([$id]);
+                    $hit = (int)$st->fetchColumn();
+                    flash('info', "Price dropped. $hit alert(s) have now reached their target price.");
+                }
+                redirect(url(['edit' => $id]));
+            } catch (Throwable $e) { $errors[] = db_error($e); }
+        }
+        $edit = ['id' => $id, 'seller_id' => $seller, 'category_id' => $cat, 'condition_id' => $cond,
+                 'title' => $title, 'description' => $desc, 'price' => $price, 'status' => $status];
+    }
+
+    if ($action === 'delete_listing') {
         try {
-            $stmt = $pdo->prepare(
-                "INSERT INTO categories (category_name, description) VALUES (?, ?)"
-            );
-            $stmt->execute([$categoryName, $description !== '' ? $description : null]);
-            header("Location: dinglasan.php");
-            exit;
-        } catch (PDOException $e) {
-            // 1062 = duplicate entry (category_name is UNIQUE)
-            if ($e->errorInfo[1] == 1062) {
-                $error = "That category already exists.";
+            $pdo->prepare('DELETE FROM listings WHERE id=?')->execute([$id]);
+            audit('Deleted Listing', "Listing #$id");
+            flash('success', 'Listing deleted (its images, alerts and chats went with it).');
+        } catch (Throwable $e) { flash('error', db_error($e)); }
+        redirect(url());
+    }
+
+    if ($action === 'add_image') {
+        $lid = (int)post('listing_id'); $imgUrl = post('image_url'); $primary = isset($_POST['is_primary']) ? 1 : 0;
+        if (mb_strlen($imgUrl) < 3 || mb_strlen($imgUrl) > 255 || preg_match('/[\s<>"\']/', $imgUrl)) {
+            flash('error', 'Image path must be 3 to 255 characters with no spaces or quotes.');
+        } else {
+            try {
+                $pdo->beginTransaction();
+                if ($primary) $pdo->prepare('UPDATE listing_images SET is_primary=0 WHERE listing_id=?')->execute([$lid]);
+                $pdo->prepare('INSERT INTO listing_images (listing_id, image_url, is_primary) VALUES (?,?,?)')->execute([$lid, $imgUrl, $primary]);
+                $pdo->commit();
+                flash('success', 'Image added.');
+            } catch (Throwable $e) { if ($pdo->inTransaction()) $pdo->rollBack(); flash('error', db_error($e)); }
+        }
+        redirect(url(['edit' => $lid]));
+    }
+    if ($action === 'set_primary' || $action === 'delete_image') {
+        $lid = (int)post('listing_id');
+        try {
+            if ($action === 'set_primary') {
+                $pdo->beginTransaction();
+                $pdo->prepare('UPDATE listing_images SET is_primary=0 WHERE listing_id=?')->execute([$lid]);
+                $pdo->prepare('UPDATE listing_images SET is_primary=1 WHERE id=? AND listing_id=?')->execute([$id, $lid]);
+                $pdo->commit();
             } else {
-                $error = "Error adding category: " . $e->getMessage();
+                $pdo->prepare('DELETE FROM listing_images WHERE id=? AND listing_id=?')->execute([$id, $lid]);
             }
-        } catch (Exception $e) {
-            $error = "Error adding category: " . $e->getMessage();
+            flash('success', 'Images updated.');
+        } catch (Throwable $e) { if ($pdo->inTransaction()) $pdo->rollBack(); flash('error', db_error($e)); }
+        redirect(url(['edit' => $lid]));
+    }
+
+    if ($action === 'save_alert') {
+        $uid = (int)post('user_id'); $lid = (int)post('listing_id'); $target = post('target_price');
+        if (!$uid || !$lid) $errors[] = 'Choose a user and a listing.';
+        if (!is_numeric($target) || (float)$target <= 0) $errors[] = 'Target price must be a number greater than 0.';
+        if (!$errors) {
+            $st = $pdo->prepare('SELECT seller_id FROM listings WHERE id=?'); $st->execute([$lid]);
+            if ((int)$st->fetchColumn() === $uid) $errors[] = 'A seller cannot set a price alert on their own listing.';
         }
+        if (!$errors) {
+            try {
+                if ($id) {
+                    $pdo->prepare('UPDATE price_drop_alerts SET user_id=?, listing_id=?, target_price=? WHERE id=?')->execute([$uid, $lid, $target, $id]);
+                } else {
+                    $pdo->prepare('INSERT INTO price_drop_alerts (user_id, listing_id, target_price) VALUES (?,?,?)')->execute([$uid, $lid, $target]);
+                    $id = (int)$pdo->lastInsertId();
+                }
+                audit('Saved Price Alert', "Alert #$id on listing #$lid at $target");
+                flash('success', 'Price alert saved.');
+                redirect(url(['tab' => 'alerts']));
+            } catch (Throwable $e) {
+                $errors[] = ($e instanceof PDOException && (int)($e->errorInfo[1] ?? 0) === 1062) ? 'This user already has an alert on that listing.' : db_error($e);
+            }
+        }
+        $edit = ['id' => $id, 'user_id' => $uid, 'listing_id' => $lid, 'target_price' => $target];
+    }
+    if ($action === 'delete_alert') {
+        try { $pdo->prepare('DELETE FROM price_drop_alerts WHERE id=?')->execute([$id]); audit('Deleted Price Alert', "Alert #$id"); flash('success', 'Alert deleted.'); }
+        catch (Throwable $e) { flash('error', db_error($e)); }
+        redirect(url(['tab' => 'alerts']));
     }
 }
- 
-// 1b. CREATE: Add a new Price Drop Alert (with target price)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_alert'])) {
-    $alertUserId    = (int)($_POST['user_id'] ?? 0);
-    $alertListingId = (int)($_POST['listing_id'] ?? 0);
-    $targetPrice    = trim($_POST['target_price'] ?? '');
- 
-    if ($alertUserId <= 0 || $alertListingId <= 0) {
-        $error = "Please choose a user and a listing.";
-    } elseif (!is_numeric($targetPrice) || (float)$targetPrice <= 0) {
-        $error = "Please enter a target price greater than 0.";
-    } else {
-        try {
-            $stmt = $pdo->prepare(
-                "INSERT INTO price_drop_alerts (user_id, listing_id, target_price) VALUES (?, ?, ?)"
-            );
-            $stmt->execute([$alertUserId, $alertListingId, round((float)$targetPrice, 2)]);
-            header("Location: dinglasan.php");
-            exit;
-        } catch (Exception $e) {
-            $error = "Error adding price drop alert: " . $e->getMessage();
-        }
-    }
+
+/* ---------- load row into form (?edit=ID) ---------- */
+if (!$edit && isset($_GET['edit'])) {
+    $st = $pdo->prepare($tab === 'alerts' ? 'SELECT * FROM price_drop_alerts WHERE id=?' : 'SELECT * FROM listings WHERE id=?');
+    $st->execute([(int)$_GET['edit']]);
+    $edit = $st->fetch() ?: null;
 }
- 
-// 2. READ REPORT: RIGHT JOIN - every price drop alert with its listing's category.
-//    price_drop_alerts has no category_id, so the category is reached through listings:
-//    price_drop_alerts -> listings -> categories
-$sql = "
-    SELECT c.category_name,
-           l.title AS listing_title,
-           pda.id AS alert_id,
-           pda.target_price,
-           pda.user_id
-    FROM categories c
-    RIGHT JOIN listings l ON c.id = l.category_id
-    RIGHT JOIN price_drop_alerts pda ON l.id = pda.listing_id
-    ORDER BY pda.id ASC
-";
-$alerts = $pdo->query($sql)->fetchAll();
- 
-// 3. MAIN LIST: RIGHT JOIN keeping EVERY category, even new ones with no listings or alerts.
-//    categories is the right-most table, so all of its rows are preserved.
-$sqlCategories = "
-    SELECT c.id AS category_id,
-           c.category_name,
-           c.description,
-           COUNT(DISTINCT l.id)   AS listing_count,
-           COUNT(DISTINCT pda.id) AS alert_count
-    FROM price_drop_alerts pda
-    RIGHT JOIN listings l ON l.id = pda.listing_id
-    RIGHT JOIN categories c ON c.id = l.category_id
-    GROUP BY c.id, c.category_name, c.description
-    ORDER BY c.id ASC
-";
-$categories = $pdo->query($sqlCategories)->fetchAll();
- 
-// Dropdown data for the price drop alert form
-$users = $pdo->query("SELECT id, full_name FROM users ORDER BY full_name")->fetchAll();
-$listings = $pdo->query("
-    SELECT l.id, l.title, l.price, c.category_name
+$f = ($tab === 'listings' && $edit) ? $edit : ['id' => 0, 'seller_id' => '', 'category_id' => '', 'condition_id' => '', 'title' => '', 'description' => '', 'price' => '', 'status' => 'active'];
+$a = ($tab === 'alerts' && $edit) ? $edit : ['id' => 0, 'user_id' => '', 'listing_id' => '', 'target_price' => ''];
+
+/* ---------- READ ---------- */
+$users      = $pdo->query('SELECT id, full_name FROM users ORDER BY full_name')->fetchAll();
+$categories = $pdo->query('SELECT id, category_name FROM categories ORDER BY category_name')->fetchAll();
+$conditions = $pdo->query('SELECT id, condition_name FROM item_conditions ORDER BY id')->fetchAll();
+$allListing = $pdo->query('SELECT id, title, price FROM listings ORDER BY title')->fetchAll();
+$listings   = $pdo->query("
+    SELECT l.id, l.title, l.price, l.status, c.category_name, ic.condition_name, u.full_name AS seller,
+           (SELECT COUNT(*) FROM listing_images i WHERE i.listing_id = l.id) AS images
     FROM listings l
-    INNER JOIN categories c ON c.id = l.category_id
-    WHERE l.status = 'active'
-    ORDER BY l.title
-")->fetchAll();
+    JOIN categories c        ON c.id  = l.category_id
+    JOIN item_conditions ic  ON ic.id = l.condition_id
+    JOIN users u             ON u.id  = l.seller_id
+    ORDER BY l.id DESC")->fetchAll();
+$images = [];
+if ($tab === 'listings' && $f['id']) {
+    $st = $pdo->prepare('SELECT * FROM listing_images WHERE listing_id=? ORDER BY is_primary DESC, id');
+    $st->execute([$f['id']]);
+    $images = $st->fetchAll();
+}
+$alerts = $pdo->query("
+    SELECT p.id, u.full_name AS watcher, l.title, l.price, l.status, p.target_price
+    FROM price_drop_alerts p
+    JOIN users u    ON u.id = p.user_id
+    JOIN listings l ON l.id = p.listing_id
+    ORDER BY p.id")->fetchAll();
+$triggered = $pdo->query('SELECT * FROM v_triggered_price_alerts ORDER BY alert_id')->fetchAll();
+
+/* ---------- JOIN REPORT: RIGHT JOIN ---------- */
+$reportSql = "
+SELECT c.category_name, l.title AS item_title, l.price AS current_price,
+       p.target_price, u.full_name AS watcher
+FROM price_drop_alerts p
+RIGHT JOIN listings l   ON p.listing_id = l.id
+RIGHT JOIN categories c ON l.category_id = c.id
+LEFT JOIN  users u      ON u.id = p.user_id
+ORDER BY c.category_name, l.title";
+$report = $pdo->query($reportSql)->fetchAll();
+
+render_header('Item Catalog', 'catalog', 'Listings, photos and price-drop alerts.', 'RIGHT JOIN');
+render_tabs($tabs, $tab);
 ?>
- 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BentaHub - Member Dinglasan (Categories & Alerts)</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
- 
-        :root {
-            --beige-bg: #f5f0e6;
-            --forest-green: #1b4332;
-            --forest-hover: #2d6a4f;
-            --card-bg: #ffffff;
-            --text-dark: #1c2518;
-            --text-muted: #5a6551;
-            --border-color: #e2dacd;
-        }
- 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
- 
-        body {
-            font-family: 'Montserrat', sans-serif;
-            background-color: var(--beige-bg);
-            color: var(--text-dark);
-            padding: 40px 20px;
-            line-height: 1.5;
-            min-height: 100vh;
-        }
- 
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-        }
- 
-        .header-banner {
-            background: linear-gradient(135deg, rgba(27, 67, 50, 0.92), rgba(45, 106, 79, 0.88)),
-                        url('881387876_1602854481033124_4271610473624714199_n.png');
-            background-size: cover;
-            background-position: center;
-            border-radius: 16px;
-            padding: 32px 36px;
-            color: #ffffff;
-            margin-bottom: 32px;
-            box-shadow: 0 10px 25px rgba(27, 67, 50, 0.18);
-        }
- 
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            text-decoration: none;
-            color: #e2dacd;
-            font-weight: 600;
-            font-size: 0.875rem;
-            margin-bottom: 16px;
-            transition: color 0.2s ease;
-        }
- 
-        .back-link:hover {
-            color: #ffffff;
-        }
- 
-        .header-banner h1 {
-            font-size: 2rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-        }
- 
-        .header-banner p {
-            font-size: 0.95rem;
-            opacity: 0.9;
-            margin-top: 4px;
-            font-weight: 500;
-        }
- 
-        .alert-error {
-            background-color: #fef2f2;
-            color: #b91c1c;
-            border: 1px solid #fecaca;
-            padding: 12px 16px;
-            border-radius: 10px;
-            margin-bottom: 24px;
-            font-size: 0.9rem;
-            font-weight: 500;
-        }
- 
-        .layout-grid {
-            display: grid;
-            grid-template-columns: 340px 1fr;
-            gap: 28px;
-            align-items: start;
-        }
- 
-        @media (max-width: 900px) {
-            .layout-grid { grid-template-columns: 1fr; }
-        }
- 
-        .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 14px;
-            padding: 26px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.04);
-        }
- 
-        .card h3 {
-            font-size: 1.15rem;
-            font-weight: 700;
-            color: var(--forest-green);
-            margin-bottom: 18px;
-        }
- 
-        .form-group {
-            margin-bottom: 16px;
-        }
- 
-        .form-group label {
-            display: block;
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
- 
-        .form-group input,
-        .form-group select {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            background: #fffdf8;
-            color: var(--text-dark);
-        }
- 
-        .form-group input:focus,
-        .form-group select:focus {
-            outline: 2px solid var(--forest-hover);
-            outline-offset: 1px;
-        }
- 
-        .btn {
-            width: 100%;
-            padding: 11px 16px;
-            background: var(--forest-green);
-            color: #ffffff;
-            border: none;
-            border-radius: 8px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s ease;
-        }
- 
-        .btn:hover {
-            background: var(--forest-hover);
-        }
- 
-        .table-wrap {
-            overflow-x: auto;
-        }
- 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-        }
- 
-        th {
-            text-align: left;
-            padding: 10px 12px;
-            border-bottom: 2px solid var(--border-color);
-            color: var(--text-muted);
-            font-weight: 600;
-            font-size: 0.8rem;
-        }
- 
-        td {
-            padding: 12px;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: top;
-        }
- 
-        tr:last-child td {
-            border-bottom: none;
-        }
- 
-        .muted {
-            color: var(--text-muted);
-            font-style: italic;
-        }
- 
-        .empty {
-            text-align: center;
-            padding: 28px 12px;
-            color: var(--text-muted);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
- 
-        <div class="header-banner">
-            <a href="index.php" class="back-link">&larr; Back to dashboard</a>
-            <h1>Categories &amp; Price Drop Alerts</h1>
-            <p>Price drop alerts matched to their listing's category (RIGHT JOIN)</p>
-        </div>
- 
-        <?php if ($error): ?>
-            <div class="alert-error"><?= htmlspecialchars($error) ?></div>
-        <?php endif; ?>
- 
-        <div class="layout-grid">
- 
-            <div style="display: grid; gap: 28px;">
- 
-            <!-- Add category form -->
-            <div class="card">
-                <h3>Add a category</h3>
- 
-                <form method="POST" action="dinglasan.php">
-                    <div class="form-group">
-                        <label for="category_name">Category name</label>
-                        <input type="text" name="category_name" id="category_name" maxlength="100"
-                               placeholder="e.g. Snacks" required>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="description">Description (optional)</label>
-                        <input type="text" name="description" id="description" maxlength="255"
-                               placeholder="What belongs in this category">
-                    </div>
- 
-                    <button type="submit" name="add_category" class="btn">Add category</button>
-                </form>
-            </div>
- 
-            <!-- Add price drop alert form -->
-            <div class="card">
-                <h3>Add a price drop alert</h3>
- 
-                <form method="POST" action="dinglasan.php">
-                    <div class="form-group">
-                        <label for="alert_user_id">User</label>
-                        <select name="user_id" id="alert_user_id" required>
-                            <option value="">Select a user</option>
-                            <?php foreach ($users as $u): ?>
-                                <option value="<?= (int)$u['id'] ?>">
-                                    <?= htmlspecialchars($u['full_name']) ?> (ID <?= (int)$u['id'] ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="alert_listing_id">Listing</label>
-                        <select name="listing_id" id="alert_listing_id" required>
-                            <option value="">Select a listing</option>
-                            <?php foreach ($listings as $l): ?>
-                                <option value="<?= (int)$l['id'] ?>">
-                                    <?= htmlspecialchars($l['title']) ?>
-                                    (<?= htmlspecialchars($l['category_name']) ?>, PHP <?= number_format((float)$l['price'], 2) ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
- 
-                    <div class="form-group">
-                        <label for="target_price">Target price (PHP)</label>
-                        <input type="number" name="target_price" id="target_price"
-                               min="0.01" step="0.01" placeholder="e.g. 1500.00" required>
-                    </div>
- 
-                    <button type="submit" name="add_alert" class="btn">Add alert</button>
-                </form>
-            </div>
- 
-            </div>
- 
-            <div style="display: grid; gap: 28px;">
- 
-            <!-- Main list: every category, including newly added ones -->
-            <div class="card">
-                <h3>All categories</h3>
- 
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Category</th>
-                                <th>Description</th>
-                                <th>Listings</th>
-                                <th>Alerts</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($categories)): ?>
-                                <tr>
-                                    <td colspan="5" class="empty">No categories yet. Add one on the left.</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($categories as $c): ?>
-                                    <tr>
-                                        <td><?= (int)$c['category_id'] ?></td>
-                                        <td><?= htmlspecialchars($c['category_name']) ?></td>
-                                        <td>
-                                            <?= $c['description'] !== null && $c['description'] !== ''
-                                                ? htmlspecialchars($c['description'])
-                                                : '<span class="muted">-</span>' ?>
-                                        </td>
-                                        <td><?= (int)$c['listing_count'] ?></td>
-                                        <td><?= (int)$c['alert_count'] ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
- 
-            <!-- Report table -->
-            <div class="card">
-                <h3>Price drop alerts by category</h3>
- 
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Alert</th>
-                                <th>Category</th>
-                                <th>Listing</th>
-                                <th>Target price</th>
-                                <th>User ID</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($alerts)): ?>
-                                <tr>
-                                    <td colspan="5" class="empty">
-                                        No price drop alerts yet. Import database/seed.sql to see data.
-                                    </td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($alerts as $a): ?>
-                                    <tr>
-                                        <td>#<?= (int)$a['alert_id'] ?></td>
-                                        <td>
-                                            <?= $a['category_name'] !== null
-                                                ? htmlspecialchars($a['category_name'])
-                                                : '<span class="muted">No category</span>' ?>
-                                        </td>
-                                        <td>
-                                            <?= $a['listing_title'] !== null
-                                                ? htmlspecialchars($a['listing_title'])
-                                                : '<span class="muted">-</span>' ?>
-                                        </td>
-                                        <td>PHP <?= number_format((float)$a['target_price'], 2) ?></td>
-                                        <td><?= (int)$a['user_id'] ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
- 
-            </div>
- 
-        </div>
-    </div>
-</body>
-</html>
+<div class="grid grid-form">
+  <section class="card">
+  <?php if ($tab === 'listings'): ?>
+    <div class="card-head"><h2><?= $f['id'] ? 'Edit listing #' . (int)$f['id'] : 'New listing' ?></h2>
+      <?php if ($f['id']): ?><a class="btn btn-sm btn-ghost" href="<?= e(url()) ?>">Cancel</a><?php endif; ?></div>
+    <?= errors_box($errors) ?>
+    <form method="post"><?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_listing"><input type="hidden" name="tab" value="listings"><input type="hidden" name="id" value="<?= (int)$f['id'] ?>">
+      <div class="field"><label>Title</label><input type="text" name="title" required maxlength="150" value="<?= e($f['title']) ?>"></div>
+      <div class="field"><label>Seller</label><select name="seller_id" required><option value="">Choose…</option>
+        <?php foreach ($users as $u): ?><option value="<?= (int)$u['id'] ?>" <?= (int)$f['seller_id'] === (int)$u['id'] ? 'selected' : '' ?>><?= e($u['full_name']) ?></option><?php endforeach; ?></select></div>
+      <div class="row2">
+        <div class="field"><label>Category</label><select name="category_id" required><option value="">Choose…</option>
+          <?php foreach ($categories as $c): ?><option value="<?= (int)$c['id'] ?>" <?= (int)$f['category_id'] === (int)$c['id'] ? 'selected' : '' ?>><?= e($c['category_name']) ?></option><?php endforeach; ?></select></div>
+        <div class="field"><label>Condition</label><select name="condition_id" required><option value="">Choose…</option>
+          <?php foreach ($conditions as $c): ?><option value="<?= (int)$c['id'] ?>" <?= (int)$f['condition_id'] === (int)$c['id'] ? 'selected' : '' ?>><?= e($c['condition_name']) ?></option><?php endforeach; ?></select></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Price (₱)</label><input type="number" name="price" required min="0.01" step="0.01" value="<?= e($f['price']) ?>"></div>
+        <div class="field"><label>Status <span class="hint">(auto-managed by meetups)</span></label><select name="status">
+          <?php foreach ($statuses as $s): ?><option value="<?= e($s) ?>" <?= $f['status'] === $s ? 'selected' : '' ?>><?= e(ucfirst($s)) ?></option><?php endforeach; ?></select></div>
+      </div>
+      <div class="field"><label>Description</label><textarea name="description" maxlength="2000"><?= e($f['description']) ?></textarea></div>
+      <div class="form-actions"><button class="btn" type="submit"><?= $f['id'] ? 'Save changes' : 'Create listing' ?></button></div>
+    </form>
+  <?php else: ?>
+    <div class="card-head"><h2><?= $a['id'] ? 'Edit alert #' . (int)$a['id'] : 'New price alert' ?></h2>
+      <?php if ($a['id']): ?><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => 'alerts'])) ?>">Cancel</a><?php endif; ?></div>
+    <?= errors_box($errors) ?>
+    <form method="post"><?= csrf_field() ?>
+      <input type="hidden" name="action" value="save_alert"><input type="hidden" name="tab" value="alerts"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>">
+      <div class="field"><label>Watcher</label><select name="user_id" required><option value="">Choose…</option>
+        <?php foreach ($users as $u): ?><option value="<?= (int)$u['id'] ?>" <?= (int)$a['user_id'] === (int)$u['id'] ? 'selected' : '' ?>><?= e($u['full_name']) ?></option><?php endforeach; ?></select></div>
+      <div class="field"><label>Listing</label><select name="listing_id" required><option value="">Choose…</option>
+        <?php foreach ($allListing as $l): ?><option value="<?= (int)$l['id'] ?>" <?= (int)$a['listing_id'] === (int)$l['id'] ? 'selected' : '' ?>><?= e($l['title']) ?> (<?= e(money($l['price'])) ?>)</option><?php endforeach; ?></select></div>
+      <div class="field"><label>Alert me at or below (₱)</label><input type="number" name="target_price" required min="0.01" step="0.01" value="<?= e($a['target_price']) ?>"></div>
+      <div class="form-actions"><button class="btn" type="submit"><?= $a['id'] ? 'Save changes' : 'Create alert' ?></button></div>
+    </form>
+  <?php endif; ?>
+  </section>
+
+  <div class="stack">
+  <?php if ($tab === 'listings'): ?>
+    <section class="card">
+      <div class="card-head"><h2>Listings <span class="muted">(<?= count($listings) ?>)</span></h2>
+        <input class="search" type="search" placeholder="Filter listings…" data-filter="#listTable"></div>
+      <div class="table-wrap"><table id="listTable">
+        <thead><tr><th>#</th><th>Item</th><th>Seller</th><th>Price</th><th>Status</th><th></th></tr></thead><tbody>
+        <?php foreach ($listings as $r): ?>
+          <tr><td><?= (int)$r['id'] ?></td>
+              <td><strong><?= e($r['title']) ?></strong><br><span class="muted"><?= e($r['category_name']) ?> · <?= e($r['condition_name']) ?> · <?= (int)$r['images'] ?> photo(s)</span></td>
+              <td><?= e($r['seller']) ?></td><td><?= e(money($r['price'])) ?></td><td><?= status_badge($r['status']) ?></td>
+              <td class="actions"><a class="btn btn-sm btn-ghost" href="<?= e(url(['edit' => $r['id']])) ?>">Edit</a>
+                <?= delete_form('delete_listing', ['id' => $r['id']], 'Delete "' . $r['title'] . '"? Its chats, meetups and alerts will be removed too.') ?></td></tr>
+        <?php endforeach; if (!$listings) echo empty_row(6, 'No listings yet.'); ?>
+      </tbody></table></div>
+    </section>
+    <?php if ($f['id']): ?>
+    <section class="card">
+      <div class="card-head"><h2>Photos for listing #<?= (int)$f['id'] ?></h2></div>
+      <div class="thumbs">
+        <?php foreach ($images as $im): ?>
+          <div class="thumb"><span><?= e($im['image_url']) ?></span><?= $im['is_primary'] ? badge('Primary', 'green') : '' ?>
+            <?php if (!$im['is_primary']): ?><form method="post" class="inline"><?= csrf_field() ?><input type="hidden" name="action" value="set_primary"><input type="hidden" name="id" value="<?= (int)$im['id'] ?>"><input type="hidden" name="listing_id" value="<?= (int)$f['id'] ?>"><input type="hidden" name="tab" value="listings"><button class="btn btn-sm btn-ghost">Make primary</button></form><?php endif; ?>
+            <?= delete_form('delete_image', ['id' => $im['id'], 'listing_id' => $f['id'], 'tab' => 'listings'], 'Remove this image?') ?></div>
+        <?php endforeach; if (!$images) echo '<span class="muted">No photos yet.</span>'; ?>
+      </div>
+      <form method="post" class="row2" style="margin-top:14px;align-items:end"><?= csrf_field() ?>
+        <input type="hidden" name="action" value="add_image"><input type="hidden" name="listing_id" value="<?= (int)$f['id'] ?>"><input type="hidden" name="tab" value="listings">
+        <div class="field" style="margin:0"><label>Image path or URL</label><input type="text" name="image_url" required maxlength="255" placeholder="images/laptop.jpg"></div>
+        <div><label class="check"><input type="checkbox" name="is_primary"> Set as primary</label><button class="btn btn-sm" type="submit">Add image</button></div>
+      </form>
+    </section>
+    <?php endif; ?>
+  <?php else: ?>
+    <section class="card">
+      <div class="card-head"><h2>Alerts that have reached their target <?= badge((string)count($triggered), count($triggered) ? 'amber' : 'gray') ?></h2></div>
+      <p class="muted" style="margin-bottom:12px">Live from the view <code>v_triggered_price_alerts</code>: an active listing priced at or below the watcher's target.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Watcher</th><th>Item</th><th>Now</th><th>Target</th><th>Below target by</th></tr></thead><tbody>
+        <?php foreach ($triggered as $t): ?>
+          <tr><td><?= e($t['watcher']) ?></td><td><?= e($t['title']) ?></td><td><?= e(money($t['current_price'])) ?></td><td><?= e(money($t['target_price'])) ?></td><td><?= badge(money($t['below_target_by']), 'green') ?></td></tr>
+        <?php endforeach; if (!$triggered) echo empty_row(5, 'No alert has been triggered yet. Lower a listing price to see one fire.'); ?>
+      </tbody></table></div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>All price alerts <span class="muted">(<?= count($alerts) ?>)</span></h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Watcher</th><th>Item</th><th>Now</th><th>Target</th><th></th></tr></thead><tbody>
+        <?php foreach ($alerts as $r): ?>
+          <tr><td><?= (int)$r['id'] ?></td><td><?= e($r['watcher']) ?></td><td><?= e($r['title']) ?> <?= status_badge($r['status']) ?></td>
+              <td><?= e(money($r['price'])) ?></td><td><?= e(money($r['target_price'])) ?></td>
+              <td class="actions"><a class="btn btn-sm btn-ghost" href="<?= e(url(['tab' => 'alerts', 'edit' => $r['id']])) ?>">Edit</a>
+                <?= delete_form('delete_alert', ['id' => $r['id'], 'tab' => 'alerts'], 'Delete this alert?') ?></td></tr>
+        <?php endforeach; if (!$alerts) echo empty_row(6); ?>
+      </tbody></table></div>
+    </section>
+  <?php endif; ?>
+
+    <section class="card">
+      <div class="card-head"><h2>Report: every category with its items and price alerts</h2><?= badge('RIGHT JOIN', 'green') ?></div>
+      <p class="muted" style="margin-bottom:12px"><code>categories</code> is the right-most table, so <strong>all</strong> categories survive, even ones with no listings (shown as “no listings”).</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Category</th><th>Item</th><th>Current price</th><th>Alert target</th><th>Watcher</th></tr></thead><tbody>
+        <?php foreach ($report as $r): ?>
+          <tr><td><strong><?= e($r['category_name']) ?></strong></td>
+              <td><?= $r['item_title'] !== null ? e($r['item_title']) : '<span class="null">no listings</span>' ?></td>
+              <td><?= $r['current_price'] !== null ? e(money($r['current_price'])) : '<span class="null">—</span>' ?></td>
+              <td><?= $r['target_price'] !== null ? e(money($r['target_price'])) : '<span class="null">no alert</span>' ?></td>
+              <td><?= e($r['watcher'] ?? '—') ?></td></tr>
+        <?php endforeach; if (!$report) echo empty_row(5); ?>
+      </tbody></table></div>
+      <?= sql_block($reportSql) ?>
+    </section>
+  </div>
+</div>
+<?php render_footer();
